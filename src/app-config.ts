@@ -36,11 +36,38 @@ export function configureApp(app: INestApplication): void {
     )
     .build();
   const document = SwaggerModule.createDocument(app, config);
-  SwaggerModule.setup('api/docs', app, document, {
-    swaggerOptions: { persistAuthorization: true },
-  });
   app.use('/api/docs-json', (req: any, res: any) => {
     res.setHeader('Content-Type', 'application/json');
     res.send(document);
+  });
+  // Serve Swagger UI from CDN so it works in serverless environments.
+  app.use('/api/docs', (req: any, res: any) => {
+    res.setHeader('Content-Type', 'text/html');
+    res.send(`<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Deplogram API — Swagger UI</title>
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.9.1/swagger-ui.css" />
+  <style>html { box-sizing: border-box; overflow-y: scroll; } *, *:before, *:after { box-sizing: inherit; } body { margin: 0; background: #fafafa; }</style>
+</head>
+<body>
+  <div id="swagger-ui"></div>
+  <script src="https://cdn.jsdelivr.net/npm/swagger-ui-dist@5.9.1/swagger-ui-bundle.js"></script>
+  <script>
+    window.onload = function() {
+      const ui = SwaggerUIBundle({
+        url: '/api/docs-json',
+        dom_id: '#swagger-ui',
+        domNode: document.getElementById('swagger-ui'),
+        deepLinking: true,
+        presets: [SwaggerUIBundle.presets.apis],
+        layout: 'StandaloneLayout',
+      });
+      window.ui = ui;
+    };
+  </script>
+</body>
+</html>`);
   });
 }
