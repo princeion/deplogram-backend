@@ -1,4 +1,4 @@
-import { Controller, Post, Body } from '@nestjs/common';
+import { Controller, Get, Post, Body, Redirect } from '@nestjs/common';
 import { AppService } from './app.service.js';
 import { OTPService } from './otp.service.js';
 import { EmailService } from './email.service.js';
@@ -30,6 +30,10 @@ export class AppController {
   getHello(): string {
     return this.appService.getHello();
   }
+
+  @Get()
+  @Redirect('/api/docs', 302)
+  root() {}
 
   // Auth/OTP endpoints
   @Post('auth/otp/send')
