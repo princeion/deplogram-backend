@@ -14,7 +14,6 @@ export class WebhookTesterService implements OnModuleInit {
   private server: any;
 
   onModuleInit() {
-    const http = require('http');
     this.server = http.createServer(
       (req: http.IncomingMessage, res: http.ServerResponse) => {
         let body = '';
@@ -52,7 +51,6 @@ export class WebhookTesterService implements OnModuleInit {
 
   trigger(url: string, method: string = 'POST', body?: any): Observable<any> {
     return new Observable((observer) => {
-      const http = require('http');
       const parsedUrl = new URL(url, 'http://localhost');
       const options = {
         hostname: parsedUrl.hostname,
@@ -62,7 +60,7 @@ export class WebhookTesterService implements OnModuleInit {
         headers: body ? { 'Content-Type': 'application/json' } : {},
       };
 
-      const req = http.request(options, (res: http.ServerResponse) => {
+      const req = http.request(options, (res: http.IncomingMessage) => {
         let data = '';
         res.on('data', (chunk: string | Buffer) => {
           data += typeof chunk === 'string' ? chunk : chunk.toString();
