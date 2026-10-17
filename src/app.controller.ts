@@ -1,4 +1,5 @@
-import { Controller, Get, Post, Body, Redirect } from '@nestjs/common';
+import { Controller, Get, Post, Body, Res } from '@nestjs/common';
+import type { Response } from 'express';
 import { AppService } from './app.service.js';
 import { OTPService } from './otp.service.js';
 import { EmailService } from './email.service.js';
@@ -32,8 +33,9 @@ export class AppController {
   }
 
   @Get()
-  @Redirect('/api/docs', 302)
-  root() {}
+  root(@Res() res: Response) {
+    return res.redirect(302, '/api/docs');
+  }
 
   // Auth/OTP endpoints
   @Post('auth/otp/send')
