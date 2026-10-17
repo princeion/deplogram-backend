@@ -3,7 +3,10 @@ import { v4 as uuidv4 } from 'uuid';
 
 @Injectable()
 export class OTPService {
-  private readonly otpStore = new Map<string, { code: string; expiresAt: number }>();
+  private readonly otpStore = new Map<
+    string,
+    { code: string; expiresAt: number }
+  >();
   private readonly logger = new Logger(OTPService.name);
 
   generateOTP(email: string): string {

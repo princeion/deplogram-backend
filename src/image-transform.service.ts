@@ -5,18 +5,11 @@ import sharp from 'sharp';
 export class ImageTransformService {
   private readonly logger = new Logger(ImageTransformService.name);
 
-  async resize(
-    buffer: Buffer,
-    width: number,
-    height: number,
-  ): Promise<Buffer> {
+  async resize(buffer: Buffer, width: number, height: number): Promise<Buffer> {
     return sharp(buffer).resize(width, height).toBuffer();
   }
 
-  async compress(
-    buffer: Buffer,
-    quality: number = 80,
-  ): Promise<Buffer> {
+  async compress(buffer: Buffer, quality: number = 80): Promise<Buffer> {
     return sharp(buffer).jpeg({ quality }).toBuffer();
   }
 
@@ -28,9 +21,6 @@ export class ImageTransformService {
   }
 
   async optimize(buffer: Buffer, quality: number = 80): Promise<Buffer> {
-    return sharp(buffer)
-      .jpeg({ quality })
-      .resize(1920, 1080)
-      .toBuffer();
+    return sharp(buffer).jpeg({ quality }).resize(1920, 1080).toBuffer();
   }
 }

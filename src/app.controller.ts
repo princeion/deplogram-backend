@@ -1,18 +1,20 @@
 import { Controller, Post, Body } from '@nestjs/common';
-import { OTPService } from './otp.service';
-import { EmailService } from './email.service';
-import { JsonFormatterService } from './json-formatter.service';
-import { JwtDecodeService } from './jwt-decode.service';
-import { Base64Service } from './base64.service';
-import { RegexTesterService } from './regex-tester.service';
-import { CronHelperService } from './cron-helper.service';
-import { WebhookTesterService } from './webhook-tester.service';
-import { ImageTransformService } from './image-transform.service';
-import { QrCodeService } from './qr-code.service';
+import { AppService } from './app.service.js';
+import { OTPService } from './otp.service.js';
+import { EmailService } from './email.service.js';
+import { JsonFormatterService } from './json-formatter.service.js';
+import { JwtDecodeService } from './jwt-decode.service.js';
+import { Base64Service } from './base64.service.js';
+import { RegexTesterService } from './regex-tester.service.js';
+import { CronHelperService } from './cron-helper.service.js';
+import { WebhookTesterService } from './webhook-tester.service.js';
+import { ImageTransformService } from './image-transform.service.js';
+import { QrCodeService } from './qr-code.service.js';
 
 @Controller()
 export class AppController {
   constructor(
+    private readonly appService: AppService,
     private readonly otpService: OTPService,
     private readonly emailService: EmailService,
     private readonly jsonFormatter: JsonFormatterService,
@@ -24,6 +26,10 @@ export class AppController {
     private readonly imageTransform: ImageTransformService,
     private readonly qrCodeService: QrCodeService,
   ) {}
+
+  getHello(): string {
+    return this.appService.getHello();
+  }
 
   // Auth/OTP endpoints
   @Post('auth/otp/send')
@@ -93,12 +99,18 @@ export class AppController {
 
   // Regex tester endpoints
   @Post('utils/regex/test')
-  testRegex(@Body('regex') regex: string, @Body('testString') testString: string) {
+  testRegex(
+    @Body('regex') regex: string,
+    @Body('testString') testString: string,
+  ) {
     return this.regexTester.test(regex, testString);
   }
 
   @Post('utils/regex/validate')
-  validateRegex(@Body('regex') regex: string, @Body('testString') testString: string) {
+  validateRegex(
+    @Body('regex') regex: string,
+    @Body('testString') testString: string,
+  ) {
     return this.regexTester.testFull(regex, testString);
   }
 
@@ -115,7 +127,11 @@ export class AppController {
 
   // Webhook tester endpoints
   @Post('utils/webhook/test')
-  testWebhook(@Body('url') url: string, @Body('method') method: string = 'POST', @Body('body') body?: any) {
+  testWebhook(
+    @Body('url') url: string,
+    @Body('method') method: string = 'POST',
+    @Body('body') body?: any,
+  ) {
     return this.webhookTester.trigger(url, method, body);
   }
 
@@ -141,7 +157,10 @@ export class AppController {
   }
 
   @Post('utils/image/compress')
-  async compressImage(@Body('buffer') buffer: Buffer, @Body('quality') quality?: number) {
+  async compressImage(
+    @Body('buffer') buffer: Buffer,
+    @Body('quality') quality?: number,
+  ) {
     return this.imageTransform.compress(buffer, quality || 80);
   }
 

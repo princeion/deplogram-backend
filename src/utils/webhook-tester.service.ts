@@ -1,4 +1,5 @@
 import { Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import * as http from 'http';
 import { Observable } from 'rxjs';
 
 @Injectable()
@@ -7,15 +8,14 @@ export class WebhookTesterService implements OnModuleInit {
   private receivedRequests: Array<{
     method: string;
     url: string;
-    headers: Record<string, string>;
-    body: any;
+    headers: Record<string, unknown>;
+    body: unknown;
   }> = [];
   private server: any;
 
   onModuleInit() {
-    const http = require('http');
     this.server = http.createServer(
-      (req: any, res: any) => {
+      (req: http.IncomingMessage, res: http.ServerResponse) => {
         let body = '';
         req.on('data', (chunk: string | Buffer) => {
           body += typeof chunk === 'string' ? chunk : chunk.toString();
@@ -24,16 +24,16 @@ export class WebhookTesterService implements OnModuleInit {
           try {
             const parsedBody = body ? JSON.parse(body) : null;
             this.receivedRequests.push({
-              method: req.method,
-              url: req.url,
-              headers: req.headers,
+              method: req.method ?? 'UNKNOWN',
+              url: req.url ?? '',
+              headers: req.headers as Record<string, unknown>,
               body: parsedBody,
             });
           } catch {
             this.receivedRequests.push({
-              method: req.method,
-              url: req.url,
-              headers: req.headers,
+              method: req.method ?? 'UNKNOWN',
+              url: req.url ?? '',
+              headers: req.headers as Record<string, unknown>,
               body,
             });
           }
@@ -61,7 +61,7 @@ export class WebhookTesterService implements OnModuleInit {
         headers: body ? { 'Content-Type': 'application/json' } : {},
       };
 
-      const req = http.request(options, (res) => {
+      const req = http.request(options, (res: http.ServerResponse) => {
         let data = '';
         res.on('data', (chunk: string | Buffer) => {
           data += typeof chunk === 'string' ? chunk : chunk.toString();
@@ -90,8 +90,8 @@ export class WebhookTesterService implements OnModuleInit {
   getReceivedRequests(): Array<{
     method: string;
     url: string;
-    headers: Record<string, string>;
-    body: any;
+    headers: Record<string, unknown>;
+    body: unknown;
   }> {
     return this.receivedRequests;
   }

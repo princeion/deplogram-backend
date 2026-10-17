@@ -4,7 +4,10 @@ import { Injectable, Logger } from '@nestjs/common';
 export class RegexTesterService {
   private readonly logger = new Logger(RegexTesterService.name);
 
-  test(regex: string, testString: string): {
+  test(
+    regex: string,
+    testString: string,
+  ): {
     match: string | null;
     groups: Record<string, string> | null;
     isValid: boolean;
