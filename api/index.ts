@@ -7,8 +7,10 @@
  */
 import { NestFactory } from '@nestjs/core';
 import { ExpressAdapter } from '@nestjs/platform-express';
-import { AppModule } from '../src/app.module.js';
 import express from 'express';
+
+import { AppModule } from '../src/app.module.js';
+import { configureApp } from '../src/app-config.js';
 
 let cachedServer: express.Express | null = null;
 let initPromise: Promise<void> | null = null;
@@ -20,6 +22,7 @@ async function bootstrap(): Promise<express.Express> {
     initPromise = (async () => {
       const server = express();
       const app = await NestFactory.create(AppModule, new ExpressAdapter(server));
+      configureApp(app);
       await app.init();
       cachedServer = server;
     })();
