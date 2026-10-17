@@ -1,6 +1,7 @@
 {
   "name": "deplogram-backend",
   "version": "0.0.1",
+  "packageManager": "npm@10.8.2",
   "description": "",
   "author": "",
   "private": true,
