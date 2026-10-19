@@ -1,6 +1,7 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import request from 'supertest';
 import { AppModule } from './../src/app.module.js';
+import { configureApp } from './../src/app-config.js';
 
 describe('Deplogram dashboard API surface (frontend contract)', () => {
   let app: any;
@@ -10,6 +11,7 @@ describe('Deplogram dashboard API surface (frontend contract)', () => {
   beforeAll(async () => {
     module = await Test.createTestingModule({ imports: [AppModule] }).compile();
     app = module.createNestApplication();
+    configureApp(app);
     await app.init();
     agent = request.agent(app.getHttpServer());
   });
@@ -332,5 +334,73 @@ describe('Deplogram dashboard API surface (frontend contract)', () => {
   it('POST /v1/auth/sign-out clears the session', async () => {
     await agent.post('/v1/auth/sign-out').expect(204);
     await agent.get('/v1/me').expect(401);
+  });
+
+  // ── sign-up (deplogram-web auth pages) ──────────────────────────────────────
+
+  it('POST /v1/auth/sign-in rejects bad credentials with 401', async () => {
+    await agent
+      .post('/v1/auth/sign-in')
+      .send({ email: 'owner@deplogram.app', password: 'wrong-password' })
+      .expect(401);
+  });
+
+  it('POST /v1/auth/sign-up creates the account, starts a session and returns the viewer', async () => {
+    const res = await agent
+      .post('/v1/auth/sign-up')
+      .send({
+        name: 'Ada Lovelace',
+        email: 'Ada@Example.com',
+        password: 'analytical-engine',
+      })
+      .expect(201);
+
+    expect(res.body).toMatchObject({
+      id: expect.any(String),
+      name: 'Ada Lovelace',
+      email: 'ada@example.com',
+      image: null,
+    });
+    const cookies = res.headers['set-cookie'] ?? [];
+    const cookieList = Array.isArray(cookies) ? cookies : [cookies];
+    expect(
+      cookieList.some((c: string) => c.startsWith('deplogram_session=')),
+    ).toBe(true);
+
+    const me = await agent.get('/v1/me').expect(200);
+    expect(me.body.email).toBe('ada@example.com');
+  });
+
+  it('POST /v1/auth/sign-up rejects a duplicate email with 409', async () => {
+    await agent
+      .post('/v1/auth/sign-up')
+      .send({
+        name: 'Ada Again',
+        email: 'ada@example.com',
+        password: 'analytical-engine',
+      })
+      .expect(409);
+  });
+
+  it('POST /v1/auth/sign-up validates the sign-up form', async () => {
+    await agent
+      .post('/v1/auth/sign-up')
+      .send({ name: 'Grace', email: 'grace@example.com', password: 'short' })
+      .expect(400);
+    await agent
+      .post('/v1/auth/sign-up')
+      .send({ name: 'Grace', email: 'not-an-email', password: 'hopper-1906' })
+      .expect(400);
+  });
+
+  it('reflects the frontend Origin for credentialed CORS requests', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/v1/workspace')
+      .set('Origin', 'https://deplogram.app')
+      .expect(200);
+    expect(res.headers['access-control-allow-origin']).toBe(
+      'https://deplogram.app',
+    );
+    expect(res.headers['access-control-allow-credentials']).toBe('true');
   });
 });

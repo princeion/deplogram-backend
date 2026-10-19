@@ -25,6 +25,7 @@ projects. Sessions and all data live exactly as long as the process does.
 | `JWT_SECRET` | Secret used by the legacy JWT utilities (`/utils/jwt/*`). |
 | `EMAIL_*` / `EMAIL_FROM` | SMTP settings for `/email/send`. |
 | `SIGN_IN_ENABLED` | Whether `/v1/auth/sign-in` accepts credentials (default `true`). |
+| `CORS_ORIGIN` | Comma-separated frontend origins allowed to send the session cookie. Defaults to reflecting the request origin. |
 
 ## The `/v1/*` API
 
@@ -43,6 +44,9 @@ fields are `null` when they do not apply.
 
 | Method & path | Description |
 | --- | --- |
+| `POST /v1/auth/sign-up` | Create an account and start a session. Body: `{ name, email, password }` (8+ characters). Returns the viewer; 409 if the email is taken. |
+| `POST /v1/auth/sign-in` | Sign in with `{ email, password }`. Returns the viewer; 401 for bad credentials. |
+| `POST /v1/auth/sign-out` | End the session and clear the cookie (204). |
 | `GET /v1/me` | The signed-in user: `{ id, name, email, image }` (401 when signed out). |
 | `GET /v1/me/settings` | The account settings: `{ name, email, preferences }`. |
 | `PATCH /v1/me/settings` | Update name and preferences. |

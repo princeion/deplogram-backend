@@ -327,8 +327,41 @@ export class DeplogramStore {
     if (!user || user.password !== password) {
       throw new Error('Invalid email or password');
     }
+    return this.startSession(user);
+  }
+
+  /**
+   * Creates an account and signs it in. Mirrors the web sign-up form: name, email and password.
+   * Duplicate emails are rejected here so every caller gets the same rule.
+   */
+  signUp(input: {
+    name: string;
+    email: string;
+    password: string;
+  }): { viewer: Viewer; sessionToken: string } {
+    const email = input.email.trim().toLowerCase();
+    if (this.findUserByEmail(email)) {
+      throw new Error('Email already registered');
+    }
+    const user: User = {
+      id: newId('user'),
+      email,
+      name: input.name.trim(),
+      image: null,
+      password: input.password,
+      createdAt: isoNow(),
+    };
+    this.users.set(user.id, user);
+    return this.startSession(user);
+  }
+
+  private startSession(user: User): {
+    viewer: Viewer;
+    sessionToken: string;
+  } {
     const sessionToken = newId('sess');
     this.sessions.set(sessionToken, user.id);
+    this.currentUser = user;
     return { viewer: this.toViewer(user), sessionToken };
   }
 

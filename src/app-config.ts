@@ -8,9 +8,23 @@ import type { INestApplication } from '@nestjs/common';
  * `api/index.ts` (Vercel serverless).
  */
 export function configureApp(app: INestApplication): void {
+  // The web client sends `credentials: "include"`, so the browser requires an
+  // exact origin (never `*`) plus `Access-Control-Allow-Credentials`. Without
+  // CORS_ORIGIN we reflect the caller's origin; in production set it to a
+  // comma-separated allow-list of frontend origins.
+  const allowedOrigins = (process.env.CORS_ORIGIN ?? '')
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean);
   app.enableCors({
-    origin: process.env.CORS_ORIGIN ?? '*',
+    origin: allowedOrigins.length
+      ? (origin: string | undefined, callback: (err: Error | null, allow?: boolean) => void) => {
+          // Curl, same-origin and server-to-server requests have no Origin.
+          callback(null, !origin || allowedOrigins.includes(origin));
+        }
+      : true,
     credentials: true,
+    methods: ['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   });
   app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
 
@@ -20,7 +34,7 @@ export function configureApp(app: INestApplication): void {
       'Backend API for the Deplogram deployment platform. Contract defined by deplogram-web.',
     )
     .setVersion('1.0.0')
-    .addTag('auth', 'Sign-in / sign-out and current viewer')
+    .addTag('auth', 'Sign-up / sign-in / sign-out and current viewer')
     .addTag('me', 'Account settings and deletion')
     .addTag('workspace', 'Workspace and plan')
     .addTag('traffic', 'Live workspace traffic')
