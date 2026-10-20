@@ -1,0 +1,1136 @@
+================================================================================
+DEPLOGRAM BACKEND - ARCHITECTURE & API CONTRACT
+================================================================================
+Document type : Living reference - answers the 8-point architecture review
+Repository    : https://github.com/princeion/deplogram-backend (branch: main)
+Revision      : bad5811 "Sync auth with frontend: sign-up route, cross-site cookies and CORS"
+Generated     : 2026-10-20
+Production    : https://deplogram-backend.vercel.app
+Frontend ref  : https://github.com/princeion/deplogram-web
+                main            = current app code (feature contracts live in src/features/**)
+                origin/Jayy     = new /login and /signup pages (UI only, no API calls yet)
+Author        : written from the code itself. Every claim is traceable to a file
+                reference; see section 10.
+
+Status legend (used for every endpoint and module in this document)
+  IMPLEMENTED  behaviour matches the frontend contract today
+  PARTIAL      route exists and is callable, but some contract behaviour is missing
+  SIMULATED    implemented, but backed by fake/in-memory logic instead of real
+               infrastructure (no Git, no builder, no CDN, no database)
+  BUG          current behaviour contradicts the frontend contract
+  PLANNED      named/expected by the frontend, no backend implementation yet
+  NOT DECIDED  no architecture decision made yet - do not assume anything
+
+--------------------------------------------------------------------------------
+0. EXECUTIVE SUMMARY
+--------------------------------------------------------------------------------
+- Stack: NestJS 12 on Express 5, TypeScript 6 (ESM / nodenext), deployed as ONE
+  Vercel serverless function (api/index.ts) that serves the whole app.
+- There is NO database. Everything lives in one in-memory `DeplogramStore`
+  (src/deplogram/store.ts), seeded on boot. Data and sessions live only as long as
+  the Node process (serverless instances are ephemeral).
+- The backend implements 30 `/v1/*` endpoints covering 100% of the routes that
+  `deplogram-web/src/features/**` calls today, plus sign-up for the new auth pages,
+  plus 23 legacy developer utility routes.
+- Authentication is a cookie session (`deplogram_session`); only `/v1/me*` enforces
+  it. Every other `/v1` endpoint - including mutations - is currently public.
+- The deployment engine is a SIMULATION: setTimeout steps, random failures, seeded
+  logs. There is no Git provider, no builder, no container registry, no CDN.
+- The live frontend still defaults to MSW mocks (NEXT_PUBLIC_API_MOCKING=enabled in
+  deplogram-web/.env.example); no deployed frontend project exists that points at
+  this API yet.
+- Biggest gaps before finalizing integration are listed in section 8.6, most notably:
+  serverless in-memory state, empty /v1/traffic, incomplete deployment lifecycle,
+  broken list/activity filters, missing 404s, and no authorization beyond /v1/me.
+
+--------------------------------------------------------------------------------
+1. TECHNOLOGY STACK AND FOLDER STRUCTURE
+--------------------------------------------------------------------------------
+1.1 Stack
+  Language          TypeScript 6 (strict), ES modules, "type": "module" in package.json
+  Framework         NestJS 12 (@nestjs/common, core, platform-express, swagger)
+  HTTP layer        Express 5 (default Nest adapter) + cookie-parser
+  Validation        class-validator + class-transformer installed; a global
+                    ValidationPipe({ whitelist: true, transform: true }) is enabled
+                    BUT only the auth endpoints validate manually - there are no DTO
+                    classes, so whitelist/transform currently do nothing for other
+                    bodies. (See 8.4 B15.)
+  Docs              @nestjs/swagger builds the OpenAPI 3.0 document; Swagger UI is
+                    served from a CDN (SwaggerModule.setup was replaced because
+                    relative asset paths break under a single serverless function).
+  Tests             Vitest 4 + supertest
+  Lint/format       oxlint --type-aware, prettier
+  Hosting           Vercel serverless (@vercel/node). Build: `npx tsc -p tsconfig.json`
+  Package manager   npm@10.8.2 (declared in package.json)
+  Local Node        v20.19.0 (Vercel project is configured for Node 24.x)
+
+1.2 Runtime topology
+  Local dev   : src/main.ts -> NestFactory.create(AppModule) -> configureApp -> :3000
+  Production  : api/index.ts -> one cached Express/Nest instance per Vercel lambda.
+                vercel.json routes every path (/v1/*, /auth/*, /utils/*, /api/docs*,
+                and a catch-all) to that single function.
+  Implication : every invocation is independent. In-memory sessions and store writes
+                do not reliably survive across requests (see 8.4 B1 / 8.6).
+
+1.3 Folder tree (source only)
+  api/
+    index.ts                       Vercel serverless entry (cached bootstrap)
+  src/
+    main.ts                        local/dev bootstrap
+    app-config.ts                  CORS + ValidationPipe + OpenAPI/Swagger UI (shared)
+    app.module.ts                  root module (imports DeplogramModule + utilities)
+    app.controller.ts              GET / redirect, /auth/otp/*, /email/send, /utils/*
+    app.controller.spec.ts         unit test for the greeting
+    app.service.ts                 "Deplogram Backend API"
+    base64.service.ts              /utils/base64/*
+    cron-helper.service.ts         /utils/cron/*
+    email.service.ts               nodemailer SMTP
+    image-transform.service.ts     sharp
+    json-formatter.service.ts      /utils/json/*
+    jwt-decode.service.ts          /utils/jwt/*
+    otp.service.ts                 in-memory OTPs
+    qr-code.service.ts             qrcode
+    regex-tester.service.ts        /utils/regex/*
+    webhook-tester.service.ts      local receiver + outbound trigger
+    api/qr-code.service.ts         duplicate copy of the QR service (pre-existing)
+    utils/webhook-tester.service.ts duplicate copy (pre-existing)
+    deploygram/  -> (actual name) deplogram/
+      deplogram.module.ts          /v1 feature module; registers SessionMiddleware,
+                                   controllers + services, exports DeplogramStore
+      store.ts                     the "database" (all Maps, seed, helpers) - 956 lines
+      types.ts                     every domain type / API contract
+      auth/                        auth.controller, auth.service, session.middleware,
+                                   auth.module
+      account/                     account.controller, account.module (GET /v1/me etc.)
+      workspace/                   workspace.controller, workspace.module
+      traffic/                     traffic.controller, traffic.service, module
+      usage/                       usage.controller, usage.service, module
+      projects/                    projects.controller, projects.service, module
+      deployments/                 deployments.controller, deployments.service, module
+      git/                         git.controller, git.module (reads the store)
+      activity/                    activity.controller, activity.module (reads the store)
+  test/
+    app.e2e-spec.ts                STALE: expects GET / -> 200 "Hello World!" (fails)
+    deplogram-api.spec.ts          32 contract tests (all pass)
+  declare_modules/                 ambient typings for jwt + qrcode
+  vercel.json, nest-cli.json, tsconfig.json, tsconfig.build.json, vitest configs
+
+1.4 Build / run caveats
+  - `npm run build` (nest build) FAILS on local Node 20 with
+    ERR_REQUIRE_CYCLE_MODULE. Vercel and local builds use
+    `npx tsc -p tsconfig.json` instead (vercel.json buildCommand).
+  - Relative imports must end in `.js` (nodenext config).
+  - `npm run test:e2e` currently fails (see 8.4 B13).
+
+--------------------------------------------------------------------------------
+2. API INVENTORY
+--------------------------------------------------------------------------------
+2.1 Conventions
+  Base paths   : /v1/* (product API), /auth/* /email/* /utils/* (legacy utilities)
+  Content type : application/json (image/QR routes return binary buffers)
+  Dates        : ISO 8601 strings (e.g. "2026-10-20T03:11:53.675Z")
+  IDs          : prefixed strings - user_, ws_, proj_, dep_, repo_, evt_, sess_
+  Sessions     : HttpOnly cookie `deplogram_session`; the web client sends
+                 credentials: "include" (see section 3)
+  Errors       : Nest default shape
+                 {"statusCode":<n>,"message":"...","error":"..."} for HttpExceptions
+                 {"statusCode":500,"message":"Internal server error"} for plain Errors
+  OpenAPI      : live at /api/docs-json; UI at /api/docs (Swagger UI via CDN)
+
+2.2 Summary table ("Auth: none" = callable without a session today)
+  #   Method & path                              Auth      Status
+  --  -----------------------------------------  --------  --------------------------
+   1  POST /v1/auth/sign-up                      none      IMPLEMENTED (new)
+   2  POST /v1/auth/sign-in                      none*     IMPLEMENTED
+   3  POST /v1/auth/sign-out                     none      IMPLEMENTED
+   4  GET  /v1/me                                session   IMPLEMENTED
+   5  GET  /v1/me/settings                       session   IMPLEMENTED
+   6  PATCH /v1/me/settings                      session   PARTIAL (no validation)
+   7  DELETE /v1/me                              session   PARTIAL (session only)
+   8  GET  /v1/workspace                         none      SIMULATED (single workspace)
+   9  GET  /v1/usage                             none      SIMULATED (fake meters)
+  10  GET  /v1/traffic                           none      BUG (always empty)
+  11  GET  /v1/projects                          none      IMPLEMENTED
+  12  POST /v1/projects                         none      PARTIAL/BUG (no build start)
+  13  GET  /v1/projects/name-availability        none      PARTIAL (no suggestion)
+  14  GET  /v1/projects/:id                      none      PARTIAL (200 empty if missing)
+  15  PATCH /v1/projects/:id                     none      PARTIAL (no validation)
+  16  DELETE /v1/projects/:id                    none      PARTIAL (204 even if missing)
+  17  GET  /v1/projects/:id/env                  none      PARTIAL ([] if missing)
+  18  PUT  /v1/projects/:id/env                  none      PARTIAL ([] if missing)
+  19  GET  /v1/projects/:id/logs                 none      PARTIAL (seeded only)
+  20  GET  /v1/projects/:id/metrics              none      SIMULATED (all zeros)
+  21  GET  /v1/deployments                       none      BUG (filters ignored)
+  22  GET  /v1/deployments/:id                   none      PARTIAL (500 if missing)
+  23  GET  /v1/deployments/:id/logs              none      PARTIAL (seeded only)
+  24  POST /v1/deployments/:id/redeploy          none      BUG (never goes live)
+  25  POST /v1/deployments/:id/rollback          none      BUG (wrong semantics)
+  26  GET  /v1/git/connection                    none      SIMULATED
+  27  GET  /v1/git/repositories                  none      SIMULATED
+  28  GET  /v1/git/repositories/:id/branches     none      SIMULATED
+  29  GET  /v1/git/repositories/:id/detect       none      SIMULATED (branch ignored)
+  30  GET  /v1/activity                          none      BUG (filters ignored)
+  * sign-in is public; returns 403 when SIGN_IN_ENABLED=false
+
+2.3 Detailed contracts
+  (Examples are real 2026-10-20 production responses; long arrays abbreviated.)
+
+  ---------------------------------------------------------------------------
+  [IMPLEMENTED] POST /v1/auth/sign-up
+  Purpose  : create an account and start a session. Added for the new Jayy auth pages.
+  Auth     : none
+  Request  : {"name":"Ada Lovelace","email":"ada@example.com","password":"analytical-engine"}
+  Response : 201 {"id":"user_...","name":"Ada Lovelace","email":"ada@example.com","image":null}
+             Set-Cookie: deplogram_session=sess_...; Path=/; HttpOnly; Max-Age=2592000;
+                         Secure; SameSite=None        (Secure/None only in production)
+  Errors   : 400 missing name / invalid email / password < 8 chars
+             409 email already registered
+  Code     : src/deplogram/auth/auth.controller.ts:72 ; store.signUp store.ts:337
+  Notes    : email is lower-cased and trimmed; passwords are stored in PLAIN TEXT.
+
+  ---------------------------------------------------------------------------
+  [IMPLEMENTED] POST /v1/auth/sign-in
+  Purpose  : sign in with email + password.
+  Auth     : none; 403 {"message":"Sign-in is disabled"} if SIGN_IN_ENABLED=false
+  Request  : {"email":"owner@deplogram.app","password":"password"}
+  Response : 200 {"id":"user_owner","name":"Sam Rivera","email":"owner@deplogram.app","image":null}
+             + Set-Cookie as above
+  Errors   : 400 missing fields; 401 "Invalid email or password"; 403 when disabled
+  Code     : src/deplogram/auth/auth.controller.ts:43
+  Demo user: owner@deplogram.app / password (seeded)
+
+  ---------------------------------------------------------------------------
+  [IMPLEMENTED] POST /v1/auth/sign-out
+  Purpose  : end the session.
+  Auth     : none
+  Request  : none
+  Response : 204 (no body) + Set-Cookie: deplogram_session=; Max-Age=0
+  Code     : src/deplogram/auth/auth.controller.ts:106
+
+  ---------------------------------------------------------------------------
+  [IMPLEMENTED] GET /v1/me
+  Purpose  : the signed-in viewer (the frontend treats 401 as "signed out").
+  Auth     : session required
+  Response : 200 {"id":"user_owner","name":"Sam Rivera","email":"owner@deplogram.app","image":null}
+  Errors   : 401 {"message":"No signed-in user","error":"Unauthorized","statusCode":401}
+  Code     : src/deplogram/account/account.controller.ts:22
+
+  ---------------------------------------------------------------------------
+  [IMPLEMENTED] GET /v1/me/settings
+  Purpose  : account settings + preferences.
+  Auth     : session required
+  Response : 200 {"name":"Sam Rivera","email":"owner@deplogram.app",
+                  "preferences":{"defaultRuntime":"nextjs","deploymentEmails":true,
+                                 "productUpdates":true}}
+  Errors   : 401
+  Code     : src/deplogram/account/account.controller.ts:36
+
+  ---------------------------------------------------------------------------
+  [PARTIAL] PATCH /v1/me/settings
+  Purpose  : update name + preferences.
+  Auth     : session required
+  Request  : {"name":"Sam","preferences":{"defaultRuntime":"node",
+              "deploymentEmails":false,"productUpdates":true}}
+  Response : 200 - the updated AccountSettings (same shape as GET)
+  Errors   : 401; 500 if `preferences` is missing/malformed (no DTO validation)
+  Code     : src/deplogram/account/account.controller.ts:43 ; store.ts:410
+  Missing  : input validation; the frontend mock also supports a 422 field-error shape
+             which the backend does not produce.
+
+  ---------------------------------------------------------------------------
+  [PARTIAL] DELETE /v1/me
+  Purpose  : "delete the account".
+  Auth     : session required
+  Response : 204
+  Errors   : 401
+  Code     : src/deplogram/account/account.controller.ts:51 ; store.ts:420
+  Missing  : it only clears the in-memory current user - no records are deleted and
+             the user can sign in again. Acceptable for a demo, not for production.
+
+  ---------------------------------------------------------------------------
+  [SIMULATED] GET /v1/workspace
+  Purpose  : the current workspace { id, name, kind, plan }.
+  Auth     : none (should be session-scoped once multi-user exists)
+  Response : 200 {"id":"ws_personal","name":"Personal Galley","kind":"personal","plan":"free"}
+  Code     : src/deplogram/workspace/workspace.controller.ts:12 ; store.ts:306
+  Notes    : always `ws_personal`; workspace -> user membership is not modelled.
+
+  ---------------------------------------------------------------------------
+  [SIMULATED] GET /v1/usage
+  Purpose  : plan limits and period usage for the Usage page.
+  Auth     : none
+  Response : 200 { period, limits[4], requests[30 days], builds[30 days],
+                   bandwidthByProject, storageByKind, trafficByHour[7][24], uptime }
+             Example limit: {"id":"active_deployments","label":"Active deployments",
+                             "limit":1,"used":2,"unit":"count"}
+  Code     : src/deplogram/usage/usage.service.ts:61 ; plan limits lines 6-42
+  Notes / caveats (PARTIAL):
+    - `limits` come from hard-coded per-plan constants (free/plus/pro/enterprise).
+    - `bandwidth` usage counts REQUESTS as if each were a byte total
+      (usage.service.ts:157) - not real bytes.
+    - `storage` usage is the number of env vars per project used as megabytes
+      (usage.service.ts:170) - placeholder.
+    - `builds` counts any non-failed deployment (including QUEUED) as succeeded.
+    - `uptime` is derived from traffic error flags, not health checks.
+    - The seeded free workspace already reports used=2 vs limit=1 active deployments.
+
+  ---------------------------------------------------------------------------
+  [BUG] GET /v1/traffic
+  Purpose  : the last ~65s of requests across live projects (Overview live map).
+  Auth     : none
+  Response : 200 {"requests":[],"liveProjects":2}   <-- requests is ALWAYS empty today
+  Code     : src/deplogram/traffic/traffic.service.ts:14
+  Root cause: `DeplogramStore.appendRequest()` (store.ts:856) has NO callers anywhere in
+             the codebase. Nothing writes to the access log after seeding (and the seed
+             writes none either). Metrics share the same empty log.
+  Impact   : the Geist/Galley live map, per-project heartbeat and metrics are inert.
+
+  ---------------------------------------------------------------------------
+  [IMPLEMENTED] GET /v1/projects
+  Purpose  : projects list as summaries (projects page, switcher, palette).
+  Auth     : none
+  Response : 200 [ ProjectSummary, ... ] - real example:
+             {"id":"proj_storefront","name":"storefront","runtime":"nextjs",
+              "state":"RUNNING","url":"https://storefront.deplogram.app",
+              "repository":"acme/storefront","branch":"main",
+              "updatedAt":"2026-10-20T04:11:53.680Z",
+              "latest":{"id":"dep_live","state":"RUNNING","live":true,"sha":"a1b2c3d",
+                        "message":"feat: live traffic dashboard",
+                        "createdAt":"2026-10-20T03:11:53.675Z"},
+              "recent":["RUNNING","RUNNING","RUNNING"]}
+  Code     : src/deplogram/projects/projects.controller.ts:29 ; service.ts:19
+  Notes    : `url` is returned WITH the scheme - see B8.
+
+  ---------------------------------------------------------------------------
+  [PARTIAL / BUG] POST /v1/projects
+  Purpose  : create a project and start its first deployment (new deployment flow).
+  Auth     : none
+  Request  : {"name":"storefront","repositoryId":"repo_storefront","branch":"main",
+              "runtime":"nextjs",
+              "config":{"buildCommand":null,"startCommand":null,"port":null,
+                        "rootDirectory":null},
+              "env":[{"key":"KEY","value":"value"}]}
+  Response : 201 {"project": ProjectSummary, "deployment": Deployment}  (deployment QUEUED)
+  Code     : src/deplogram/projects/projects.service.ts:37
+  Missing / BUG:
+    - The first deployment is created directly on the store and NO build is started
+      (`DeploymentService.startBuild` is never called). Verified on production: the
+      deployment was still QUEUED after 5s and never progressed. (B2)
+    - No name-uniqueness check; duplicate project names are accepted (B16).
+    - No body validation (arbitrary runtime/config accepted).
+
+  ---------------------------------------------------------------------------
+  [PARTIAL] GET /v1/projects/name-availability?name=
+  Purpose  : is a project name/URL free.
+  Auth     : none
+  Response : 200 {"available":false,"url":"https://storefront.deplogram.app","suggestion":null}
+  Code     : src/deplogram/projects/projects.service.ts:74
+  Missing  : `suggestion` is always null (the frontend renders "try <suggestion>");
+             no server-side name-format validation; check is case-sensitive.
+
+  ---------------------------------------------------------------------------
+  [PARTIAL] GET /v1/projects/:id
+  Purpose  : one project with config + env.
+  Auth     : none
+  Response : 200 Project = summary + {createdAt, liveDeploymentId, envCount, config, env}
+  Errors   : NONE for a missing id - returns 200 with an empty body (B9). The frontend
+             expects a 404 (its mock returns 404).
+  Code     : src/deplogram/projects/projects.controller.ts:50 ; service.ts:32
+
+  ---------------------------------------------------------------------------
+  [PARTIAL] PATCH /v1/projects/:id
+  Purpose  : rename, retarget branch, change build/start config.
+  Auth     : none
+  Request  : {"name":"new-name","branch":"main","config":{"port":3000}}
+  Response : 200 Project (updated)
+  Code     : src/deplogram/projects/projects.controller.ts:56 ; service.ts:60
+  Missing  : unknown id -> 200 empty (B9); every update is recorded as the activity type
+             `project.renamed` even when only the branch/config changed (B17).
+
+  ---------------------------------------------------------------------------
+  [PARTIAL] DELETE /v1/projects/:id
+  Purpose  : take a project offline, delete its deployments.
+  Auth     : none
+  Response : 204 (also for an unknown id)
+  Code     : src/deplogram/projects/projects.controller.ts:62 ; store.ts:539
+  Missing  : deployment build/runtime logs are NOT deleted (unbounded memory growth),
+             and no 404 for a missing project (B9).
+
+  ---------------------------------------------------------------------------
+  [PARTIAL] GET /v1/projects/:id/env
+  Purpose  : saved env var names (never values).
+  Auth     : none
+  Response : 200 [{"key":"FOO","updatedAt":"..."}]
+  Errors   : unknown id -> 200 []  (B9)
+  Code     : src/deplogram/projects/projects.controller.ts:66 ; store.ts:556
+
+  ---------------------------------------------------------------------------
+  [PARTIAL] PUT /v1/projects/:id/env
+  Purpose  : replace the whole variable set. value:null keeps the saved value.
+  Auth     : none
+  Request  : [{"key":"FOO","value":"bar"},{"key":"KEEP","value":null}]
+  Response : 200 [{"key":"KEEP","updatedAt":"..."}]  (values are never echoed)
+  Errors   : unknown id -> 200 []  (B9)
+  Code     : src/deplogram/projects/projects.controller.ts:72 ; store.ts:565
+  Missing  : no key/value validation; values stored in plain text; no encryption
+             (secrets handling is an open decision, section 9).
+
+  ---------------------------------------------------------------------------
+  [PARTIAL] GET /v1/projects/:id/logs?after=n
+  Purpose  : the live deployment's runtime log.
+  Auth     : none
+  Response : 200 {"lines":[{"n":1,"at":"...","level":"info","source":"app",
+                            "text":"listening on http://localhost:3000"}],"live":true}
+  Errors   : unknown id -> 500 (should be 404)  (B9)
+  Code     : src/deplogram/projects/projects.controller.ts:78 ; service.ts:105
+  Missing  : only the seeded project has one log line; nothing appends live lines for
+             running deployments, so the log never grows.
+
+  ---------------------------------------------------------------------------
+  [SIMULATED] GET /v1/projects/:id/metrics?range=1h|24h|7d
+  Purpose  : requests/latency/resources for the Metrics page.
+  Auth     : none
+  Response : 200 {"range":"24h",
+                  "summary":{"requests":0,"errorRate":0,"p95":0,"uptime":1},
+                  "series":[{"t":"...","requests":0,"errors":0,"p50":0,"p95":0,
+                             "cpu":0,"memory":0}, ...],
+                  "statuses":{"ok":0,"redirect":0,"clientError":0,"serverError":0},
+                  "paths":[], "memoryLimit":512}
+  Errors   : unknown id -> 500 (B9); an unrecognised range silently falls back to 24h
+  Code     : src/deplogram/projects/projects.controller.ts:84 ; service.ts:117
+  Missing  : because the access log is never written (B5), every metric is zero. cpu/
+             memory are hard-coded 0; memoryLimit is a constant 512.
+
+  ---------------------------------------------------------------------------
+  [BUG] GET /v1/deployments?q&status&project&branch&trigger&sort&page&pageSize
+  Purpose  : paged/filtered/sorted deployment list.
+  Auth     : none
+  Response : 200 {"items":[Deployment],"total":4,"page":1,"pageSize":2}
+  Code     : src/deplogram/deployments/deployments.controller.ts:13 ; service.ts:44
+  BUGS (verified against production, 2026-10-20):
+    - `status` is NOT applied: ?status=failed returned all 4 deployments (all RUNNING).
+      The filter loop returns true when no group matches (service.ts:59-63) instead of
+      excluding. Same for the `failed` and `in_progress` groups.
+    - Comma-separated values are not split (controller parseListQuery, deployments
+      .controller.ts:61). The frontend sends `status=running,failed`,
+      `project=a,b`, etc.; only single values work. ?project=proj_api,proj_docs
+      returned total 0.
+    - `q`, single `project`, `branch`, `trigger`, `sort`, `page`, `pageSize` work.
+    - `pageSize` is unbounded (no cap).
+
+  ---------------------------------------------------------------------------
+  [PARTIAL] GET /v1/deployments/:id
+  Purpose  : one deployment.
+  Auth     : none
+  Response : 200 Deployment - real example:
+             {"id":"dep_live","projectId":"proj_storefront","projectName":"storefront",
+              "runtime":"nextjs","state":"RUNNING","live":true,
+              "commit":{"sha":"a1b2c3d","message":"feat: live traffic dashboard",
+                        "branch":"main",
+                        "author":{"name":"Ada Lovelace","avatarUrl":null}},
+              "trigger":"git","createdAt":"2026-10-20T03:11:53.675Z",
+              "durationSeconds":null,"url":"https://storefront.deplogram.app",
+              "config":{"runtimeVersion":"22.14.0","buildCommand":null,
+                        "startCommand":null,"port":null},
+              "previousLiveId":"dep_old_1"}
+  Errors   : unknown id -> 500 (should be 404)  (B9)
+  Notes    : `durationSeconds` is null even for finished RUNNING deployments (B10);
+             `url` includes the scheme (B8).
+
+  ---------------------------------------------------------------------------
+  [PARTIAL] GET /v1/deployments/:id/logs?after=n
+  Purpose  : the build log + step states for the deployment page.
+  Auth     : none
+  Response : 200 {"lines":[{n,at,step,stream,text},...],"steps":[],"done":true}
+  Errors   : unknown id -> 500 (B9)
+  Code     : src/deplogram/deployments/deployments.controller.ts:27 ; service.ts:103
+  Missing  : the simulator never appends log LINES (only step states, which it deletes
+             when the build finishes), so newly created deployments return empty logs
+             and `steps` is [] once done (B12). Seeded deployments have a handful of
+             hard-coded lines.
+
+  ---------------------------------------------------------------------------
+  [BUG] POST /v1/deployments/:id/redeploy
+  Purpose  : build the same commit again; returns the new deployment.
+  Auth     : none
+  Request  : none
+  Response : 201 new Deployment, trigger "redeploy", state QUEUED
+  Errors   : unknown id -> 500 (B9)
+  Code     : src/deplogram/deployments/deployments.controller.ts:33 ; service.ts:118
+  BUGS:
+    - The simulated build is driven by setTimeout. On Vercel the lambda is frozen after
+      the response, so the deployment stayed QUEUED after 6s (verified in production).
+      It only advances while serving traffic on a warm instance (B1).
+    - Even when the timer runs, `finishBuild` (service.ts:244) sets state RUNNING but
+      NEVER calls `store.markLive`, so the new deployment is not live, has no url, and
+      the previous live deployment stays live (B3). The frontend expects the new build
+      to become live and the old one to step down.
+
+  ---------------------------------------------------------------------------
+  [BUG] POST /v1/deployments/:id/rollback
+  Purpose  : make an earlier successful deployment live again, reusing its build.
+  Auth     : none
+  Response : 201 {"deployment": Deployment, "previousLiveId": string|null}
+  Errors   : 409 "No earlier deployment to roll back to"
+  Code     : src/deplogram/deployments/deployments.controller.ts:39 ; service.ts:136 ;
+             store.rollbackTo store.ts:712
+  CONTRACT (from deplogram-web/src/mocks/data/deployments.ts:209 and the UI in
+  use-deployment-actions.tsx):
+    - `:id` is the EARLIER, RUNNING, NON-LIVE deployment the user chose ("Roll back to
+      this"). The UI only offers rollback on `state === 'RUNNING' && !live`.
+    - Expected: 409 if the target is missing / not RUNNING / already live / the project
+      is mid-deploy; then create a NEW deployment (copy of the target, trigger
+      "rollback", DEPLOYING -> RUNNING, becomes live, old live steps down); return
+      `{ deployment: <new deployment>, previousLiveId: <the previously live id> }` so
+      the UI's Undo ("roll forward") works.
+  ACTUAL:
+    - It treats `:id` as the CURRENT deployment and promotes `id.previousLiveId`
+      instead of `:id` itself (store.rollbackTo promotes target.previousLiveId).
+    - It never creates a new deployment; it returns the passed deployment as
+      `deployment`.
+    - Example: rolling back to dep_old_1 actually makes dep_old_2 live.
+    - The existing test only passes because it rolls back the live deployment
+      (dep_live), not the frontend's pattern; the test encodes the wrong behaviour.
+
+  ---------------------------------------------------------------------------
+  [SIMULATED] GET /v1/git/connection
+  Purpose  : which Git account is connected.
+  Auth     : none
+  Response : 200 {"provider":"github","connected":true,"account":"princeion"}
+  Code     : src/deplogram/git/git.controller.ts:15 ; store.ts:897
+  Notes    : constant seeded account; no OAuth, no tokens.
+
+  ---------------------------------------------------------------------------
+  [SIMULATED] GET /v1/git/repositories?q=
+  Purpose  : importable repositories, searchable by name.
+  Auth     : none
+  Response : 200 [{"id":"repo_storefront","fullName":"acme/storefront","private":false,
+                   "defaultBranch":"main","updatedAt":"...","projectId":"proj_storefront"}]
+  Code     : src/deplogram/git/git.controller.ts:21 ; store.ts:905
+  Notes    : two seeded repos (acme/storefront, acme/api). `projectId` is a back-reference
+             set when a project was imported.
+
+  ---------------------------------------------------------------------------
+  [SIMULATED] GET /v1/git/repositories/:id/branches
+  Response : 200 [{"name":"main","commit":{"sha":"a1b2c3d","message":"feat: live traffic
+                   dashboard"}}, {"name":"feature/logs", ...}]
+  Code     : src/deplogram/git/git.controller.ts:27 ; store.ts:914
+
+  ---------------------------------------------------------------------------
+  [SIMULATED] GET /v1/git/repositories/:id/detect?branch=
+  Purpose  : detect runtime + defaults from repo contents.
+  Response : 200 {"runtime":"nextjs","evidence":"package.json (nextjs)",
+                  "buildCommand":"npm run build","startCommand":"npm start","port":3000,
+                  "envExample":[]}
+  Code     : src/deplogram/git/git.controller.ts:33 ; store.ts:918
+  Missing  : the `branch` parameter is ignored; results are hard-coded by repository id;
+             envExample is always [].
+
+  ---------------------------------------------------------------------------
+  [BUG] GET /v1/activity?type&project&cursor&limit
+  Purpose  : the audit/activity timeline (Activity page, Overview recent list).
+  Auth     : none
+  Response : 200 {"items":[ActivityEvent,...],"nextCursor":"evt_..."|null}
+             Example event: {"id":"evt_...","at":"...","type":"env.updated",
+                             "actor":{"name":"Sam Rivera"},
+                             "project":{"id":"proj_storefront","name":"storefront"},
+                             "deployment":null,"detail":"added SENTRY_DSN"}
+  Code     : src/deplogram/activity/activity.controller.ts:15 ; store.ts:837
+  BUG      : `type` and `project` query params are accepted but IGNORED
+             (activity.controller.ts:17-23 never forwards them). Verified: ?type=failures
+             and ?project=proj_api both returned the unfiltered 10 most recent events.
+             README.md claims these filters are supported. `cursor` + `limit` work.
+
+2.4 Legacy developer utility routes (predate /v1; all public; status: works, demo-grade)
+  GET  /                            -> 302 redirect to /api/docs
+  POST /auth/otp/send               body {email} -> {message}; OTP is logged server-side
+  POST /auth/otp/verify             body {email,code} -> {valid}
+  POST /email/send                  body {to,subject,html} -> sends via SMTP (nodemailer)
+  POST /utils/json/formatter        body {json} -> formatted
+  POST /utils/json/validate         body {json} -> {valid,...}
+  POST /utils/json/minify           body {json} -> minified
+  POST /utils/jwt/decode            body {token} -> decoded
+  POST /utils/jwt/expiry            body {token} -> {expiry}
+  POST /utils/jwt/validate          body {token} -> {valid}
+  POST /utils/base64/encode         body {data} -> {encoded}
+  POST /utils/base64/decode         body {encoded} -> {decoded}
+  POST /utils/regex/test            body {regex,testString} -> matches
+  POST /utils/regex/validate        body {regex,testString} -> full-match result
+  POST /utils/cron/parse            body {expression} -> {fields,nextRun}
+  POST /utils/cron/readable         body {expression} -> human text
+  POST /utils/webhook/test          body {url,method,body} -> fires an OUTBOUND request
+  POST /utils/webhook/received      -> captured inbound requests
+  POST /utils/webhook/clear         -> clears captured requests
+  POST /utils/image/transform       body {buffer,width,height} -> sharp buffer
+  POST /utils/image/compress        body {buffer,quality} -> sharp jpeg buffer
+  POST /utils/image/convert         body {buffer,format} -> sharp buffer
+  POST /utils/qr/generate           body {data,type} -> PNG buffer (svg type ignored)
+
+2.5 OpenAPI / Swagger
+  /api/docs      -> Swagger UI (HTML; assets loaded from cdn.jsdelivr.net)
+  /api/docs-json -> OpenAPI 3.0.0 document (generated at boot from the controllers)
+  Servers listed: http://localhost:3000 (Local development) and
+                  https://deplogram-backend.vercel.app (Production)
+  Note: the document is generated automatically, so every route above appears - but
+        request bodies are not always typed (no DTOs), so some schemas are empty.
+
+--------------------------------------------------------------------------------
+3. AUTHENTICATION AND AUTHORIZATION
+--------------------------------------------------------------------------------
+3.1 Flow
+  Sign-in / sign-up
+    Browser (credentials:"include")
+      -> POST /v1/auth/sign-in|sign-up
+      -> AuthController validates the body
+      -> DeplogramStore.signIn/signUp -> creates a token, stores token -> userId in
+         `store.sessions` (Map) and sets `store.currentUser`
+      -> Set-Cookie: deplogram_session=<token>; Path=/; HttpOnly; Max-Age=2592000;
+         Secure; SameSite=None   (production; Lax without Secure otherwise)
+      -> 200/201 viewer JSON
+  Every request
+    SessionMiddleware (applied to '*') runs cookie-parser, then
+    store.setCurrentUserFromSession(cookie) -> looks the token up in `sessions`.
+    Controllers read `store.getViewer()` / `store.currentUser`.
+  Session storage
+    src/deplogram/auth/session.middleware.ts ; store.ts:374-384
+    Tokens are random strings in an in-memory Map - they are NOT signed JWTs and are
+    lost on process restart.
+
+3.2 Cookie attributes
+  name     : deplogram_session
+  Path     : /
+  HttpOnly : yes
+  Max-Age  : 2592000 (30 days)
+  Secure   : when NODE_ENV=production or VERCEL is set (i.e. always on Vercel)
+  SameSite : None in production (needed for cross-site fetch with credentials),
+             Lax locally
+  Clearing : POST /v1/auth/sign-out sets the same name with Max-Age=0
+
+3.3 CORS (src/app-config.ts:10)
+  - If CORS_ORIGIN is set (comma-separated list), only those origins are allowed.
+  - If unset, the caller's Origin is reflected (so `credentials: true` still works;
+    the previous `origin: "*"`, which browsers reject with credentials, was fixed).
+  - Allowed methods: GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS
+  - Access-Control-Allow-Credentials: true
+
+3.4 Authorization reality
+  - Only AccountController checks the session (`signedIn()`, account.controller.ts:31).
+    Every other `/v1` route - including create/update/delete of projects, env vars,
+    deployments, redeploy, rollback - is OPEN. Verified: POST /v1/projects without a
+    cookie returns 201; GET /v1/workspace without a cookie returns 200.
+  - There are no roles, permissions, teams or workspace membership checks. The store is
+    a single global dataset; `currentUser` is set per request purely for attribution
+    (activity actor, project creation) and for /v1/me.
+  - No CSRF protection on cookie-authenticated mutations.
+
+3.5 Gaps / risks (see also section 7)
+  - Authorization must be added before any shared deployment (IMPLEMENTED none beyond
+    /v1/me). Open decision: session-scoped guards vs. API tokens (section 9).
+  - Passwords are plain text; sessions are unsigned in-memory tokens.
+  - Default CORS reflection + cookie auth is permissive; set CORS_ORIGIN in production.
+  - No rate limiting / lockout on sign-in.
+
+--------------------------------------------------------------------------------
+4. DATA MODEL AND RELATIONSHIPS
+--------------------------------------------------------------------------------
+4.1 Storage engine
+  There is no database, ORM or migrations. `DeplogramStore` (src/deplogram/store.ts) is
+  one @Injectable singleton holding JavaScript Maps and arrays, seeded in `seed()`
+  (store.ts:84). All `/v1` services read/write this same instance. Two private Maps
+  (`buildLog`, `runtimeLog`) hold logs; `requests` is an array access log; `activity`
+  is a Map plus an ordered array.
+
+  Collections (store.ts:59-75)
+    users          Map<userId, User>
+    workspaces     Map<wsId, Workspace>
+    projects       Map<projId, Project>            (embeds its env vars)
+    deployments    Map<depId, Deployment>
+    repositories   Map<repoId, GitRepository>
+    branches       Map<repoId, GitBranch[]>
+    activity       Map<evtId, ActivityEvent>
+    activityOrder  ActivityEvent[]   (newest first, capped at 500)
+    requests       TrafficPoint[]    (access log, capped at 5000)
+    sessions       Map<token, userId>
+    preferences    Map<userId, AccountPreferences> (private)
+    buildLog       Map<depId, BuildLogLine[]>       (private)
+    runtimeLog     Map<depId, RuntimeLogLine[]>     (private)
+    currentUser    User | null       (set per request by middleware)
+    connectedAccount string | null   (seeded "princeion")
+
+4.2 Entities (field lists; see src/deplogram/types.ts for the canonical shapes)
+  User              id, email, name, image|null, password (plain), createdAt
+  AccountPreferences defaultRuntime, deploymentEmails, productUpdates
+  Workspace         id, name, kind personal|team, plan free|plus|pro|enterprise
+  GitRepository     id, fullName "owner/name", private, defaultBranch, updatedAt,
+                    projectId|null
+  GitBranch         name, commit{sha,message}
+  GitDetection      runtime|null, evidence|null, buildCommand|null, startCommand|null,
+                    port|null, envExample[]
+  Project           id, name, runtime, state, url|null, repository, branch, updatedAt,
+                    latest{...}|null, recent[], createdAt, liveDeploymentId|null,
+                    envCount, config{runtimeVersion,buildCommand,startCommand,port,
+                    rootDirectory}, env[{key,value,updatedAt}]
+  Deployment        id, projectId, projectName, runtime, state, live, commit{sha,message,
+                    branch,author{name,avatarUrl}}, trigger git|manual|redeploy|rollback,
+                    createdAt, durationSeconds|null, url|null, config{runtimeVersion,
+                    buildCommand,startCommand,port}, previousLiveId|null
+  BuildLogLine      n, at, step clone|install|build|deploy|runtime, stream stdout|stderr,
+                    text
+  RuntimeLogLine    n, at, level info|warn|error, source request|app, text
+  BuildStep         id, label, state pending|running|succeeded|failed|skipped,
+                    startedAt|null, endedAt|null
+  TrafficPoint      at, projectId, error, city, status, latencyMs, path
+  ActivityEvent     id, at, type, actor{name}, project{id,name}|null,
+                    deployment{id,sha,message,branch,state,trigger}|null, detail|null
+  UsageLimit        id, label, used, limit, unit count|minutes|bytes
+
+  Enumerations
+    DeploymentState : QUEUED, BUILDING, BUILT, DEPLOYING, RUNNING, BUILD_FAILED,
+                      DEPLOY_FAILED, CRASHED
+    ActivityType    : deployment.started|succeeded|failed|rolled_back, project.created|
+                      renamed|deleted, env.updated, settings.updated
+    Plan            : free, plus, pro, enterprise
+    UsageLimitId    : active_deployments, build_minutes, bandwidth, storage
+
+4.3 Relationships (text ERD)
+  User 1--* Session(token)                      (sessions Map: token -> userId)
+  User 1--1 AccountPreferences
+  Workspace 1--* Project                        (implicit; only ws_personal exists and
+                                                 projects are not scoped by workspace id)
+  GitRepository 1--0..1 Project                 (repository.projectId back-reference;
+                                                 Project.repository stores "owner/name")
+  Project 1--* Deployment                       (deployment.projectId)
+  Project 1--0..1 Deployment (live)             (project.liveDeploymentId)
+  Deployment 1--* BuildLogLine                  (buildLog Map keyed by deploymentId)
+  Deployment 1--* RuntimeLogLine                (runtimeLog Map keyed by deploymentId)
+  Deployment 0..1--0..1 Deployment (previousLiveId -> the one to restore)
+  ActivityEvent 0..1--0..1 Project, 0..1--0..1 Deployment (denormalised refs)
+  TrafficPoint *--1 Project                     (projectId; project may be deleted)
+
+  No foreign keys are enforced; deletion does not cascade to logs/requests/activity.
+
+4.4 Seed data (store.ts:84-301)
+  User       : user_owner  owner@deplogram.app / password  ("Sam Rivera")
+  Workspace  : ws_personal "Personal Galley", kind personal, plan free
+  Git        : connected account "princeion"
+               repo_storefront  acme/storefront (public, main, linked to proj_storefront)
+                                  branches: main, feature/logs
+               repo_api         acme/api (private, main, linked to proj_api)
+  Projects   : proj_storefront (nextjs), proj_api (node), proj_docs (static, gh-pages)
+  Deployments: dep_old_2 (storefront, older) -> dep_old_1 -> dep_live (storefront, live)
+               dep_api_live (api, live)
+               storefront's live chain gives rollback a previousLiveId
+  Logs       : a handful of hard-coded build lines + one runtime line per live dep
+  Activity   : a few events (project.created, deployment.started, env.updated)
+  Access log : EMPTY (no seeded traffic) -> /v1/traffic and metrics are empty/zero
+
+4.5 Lifecycle limits
+  - Everything is lost when the process/instance ends; mutations are per-instance.
+  - activityOrder capped at 500; requests capped at 5000; no caps on users/projects/
+    deployments/env/logs.
+  - Deleting a project removes its deployments (store.ts:539) but not their logs,
+    traffic or activity.
+
+--------------------------------------------------------------------------------
+5. DEPLOYMENT ENGINE ARCHITECTURE
+--------------------------------------------------------------------------------
+5.1 What exists today: a simulation, not an engine
+  The only "engine" is `DeploymentService` (src/deplogram/deployments/deployments.service.ts)
+  plus the store helpers it calls. There is:
+    - no Git clone/fetch (Git endpoints are seeded data),
+    - no build runner, no container runtime, no image registry,
+    - no CDN/static hosting, no domain provisioning, no TLS,
+    - no infrastructure provider integration (Vercel/Fly/AWS/K8s/Firecracker/etc.),
+    - no scheduler/worker/queue.
+  A "build" is a chain of setTimeout calls inside a serverless request handler.
+
+5.2 State machine (per the contract in types.ts:14-30)
+  QUEUED -> BUILDING -> BUILT -> DEPLOYING -> RUNNING        (success)
+          \-> BUILD_FAILED                                   (build failure)
+                            \-> DEPLOY_FAILED                  (deploy failure)
+  CRASHED is declared but never produced by the simulator.
+  PRODUCT GAP: the simulator never assigns BUILDING, BUILT or DEPLOYING to
+  `deployment.state`. The state stays QUEUED until it jumps to RUNNING or a failure
+  (deployments.service.ts startBuild/finishBuild). So the UI never sees the middle
+  states from the API (only `steps` change). (B11)
+
+5.3 Build steps and timing (startBuild, service.ts:163)
+  Steps, in order: clone, install, build, deploy, runtime
+  Delay: 900 ms per step; runtime 400 ms -> ~4 s total
+  Random failures: build 15%, deploy 10%
+  Step objects carry {id,label,state,startedAt,endedAt}; they live in an in-memory Map
+  on the service instance and are DELETED when the build settles (`builds.delete`), so
+  GET .../logs returns `steps: []` once `done` is true.
+  No build log LINES are produced by the simulator. (B12)
+
+5.4 Supported runtimes
+  The runtime set is defined by the frontend (deplogram-web/src/content/runtimes.ts):
+    id      name        default build command          default start        default port
+    vite    Vite        npm run build                  (static output)      -
+    nextjs  Next.js     npm run build                  npm start            3000
+    node    Node.js     npm run build                  node server.js       8080
+    python  Python      pip install -r requirements    uvicorn main:app     8000
+    php     PHP         composer install               php artisan serve    8000
+    go      Go          go build -o app                ./app                8080
+    static  Static      (optional)                     (static files)       -
+    docker  Docker      docker build .                 CMD from Dockerfile  EXPOSE
+  Backend behaviour:
+    - Project/Deployment store whatever `runtime` string they are given (no validation).
+    - `config.runtimeVersion` is derived by store.defaultRuntimeVersion (store.ts:940):
+      nextjs -> "22.14.0", node -> "22.x", python -> "3.12", php -> "8.3", go -> "1.23",
+      anything else -> "latest". Note nextjs returns a Node version string.
+    - Runtime detection (git/detect) only ever returns nextjs (repo_storefront) or node
+      (repo_api); the `branch` argument is ignored.
+
+5.5 Logs
+  Build logs   : `buildLog` Map; seeded lines only; cursor is the 1-based `n`.
+                 GET /v1/deployments/:id/logs?after=n returns lines after n, plus step
+                 states, plus `done`.
+  Runtime logs : `runtimeLog` Map; one seeded line for each live seeded deployment.
+                 GET /v1/projects/:id/logs?after=n returns the live deployment's log +
+                 `live` (true while a deployment is live). Nothing appends new lines.
+  No log streaming (SSE/WebSocket) exists; the frontend polls (1s build, 1.5s runtime).
+
+5.6 URLs and live marking
+  store.urlOf (store.ts:936) returns `https://<projectName>.deplogram.app` - i.e. a full
+  URL, whereas the frontend treats `ProjectSummary.url` / `Deployment.url` as a HOST and
+  prepends `https://` itself -> broken links (B8).
+  `markLive` (store.ts:694) unsets `live` on the project's other deployments, sets
+  state=RUNNING, url, project.liveDeploymentId and project.state=RUNNING. It is called
+  ONLY by the seed and by rollback - never by a finished build (B3).
+  `durationSeconds` is set only for failures (finishDeployment, store.ts:734); successful
+  RUNNING deployments keep null (B10).
+
+5.7 Traffic, metrics and usage generation
+  - TrafficPoint access log is intended to feed /v1/traffic and project metrics, but
+    nothing calls `appendRequest` -> both are empty/zero (B5).
+  - Metrics are computed from the access log (bucket sizes 5min/1h/6h for 1h/24h/7d);
+    p50/p95 via nearest-rank percentile; cpu/memory hard-coded 0; memoryLimit 512 (MB).
+  - Usage is derived from deployments + requests with placeholder maths (see 2.3).
+
+5.8 Serverless caveat (critical)
+  setTimeout-based builds do not survive a serverless response. Verified in production:
+  POST /v1/deployments/dep_live/redeploy returned a QUEUED deployment that was STILL
+  QUEUED 6 seconds later. Combined with the in-memory store, the deployment engine only
+  works in a long-lived process (local dev) and only while the same instance stays warm.
+
+5.9 Status summary
+  IMPLEMENTED (simulated) : seeded project/deployment data, build-step state machine,
+                            build log cursor read API, redeploy/rollback endpoints exist
+  PARTIAL                 : lifecycle states, live marking, duration, logs, traffic
+  PLANNED / NOT DECIDED   : real Git integration, real builder, container runtime,
+                            registry, CDN/static hosting, DNS/TLS, autoscaling,
+                            observability - all open (section 9)
+
+--------------------------------------------------------------------------------
+6. FRONTEND INTEGRATION
+--------------------------------------------------------------------------------
+6.1 Source of truth
+  The frontend's Zod schemas under deplogram-web/src/features/** define the contract.
+  The backend types (src/deplogram/types.ts) mirror them; the e2e test suite asserts the
+  shapes over HTTP with a cookie agent.
+
+6.2 Endpoint coverage (frontend feature module -> backend route -> status)
+  features/auth/session.ts        POST /v1/auth/sign-in, /v1/auth/sign-out, GET /v1/me
+                                                                    -> IMPLEMENTED
+                                  (new sign-up endpoint added; frontend hook pending)
+  features/account/account.ts     GET/PATCH /v1/me/settings, DELETE /v1/me
+                                                                    -> PARTIAL (validation)
+  features/workspace/workspace.ts GET /v1/workspace                  -> SIMULATED
+  features/usage/usage.ts         GET /v1/usage                      -> SIMULATED
+  features/projects/projects.ts   GET/POST /v1/projects, GET/PATCH/DELETE /v1/projects/:id,
+                                  GET/PUT :id/env, GET :id/logs, GET :id/metrics,
+                                  GET /v1/traffic                      -> MIXED (bugs 2.3)
+  features/deploy/deploy.ts       GET /v1/git/connection,
+                                  GET /v1/git/repositories?q,
+                                  GET /v1/git/repositories/:id/branches,
+                                  GET /v1/git/repositories/:id/detect,
+                                  GET /v1/projects/name-availability,
+                                  POST /v1/projects                    -> SIMULATED / PARTIAL
+  features/deployments/deployments.ts
+                                  GET /v1/deployments(+filters), GET :id, GET :id/logs,
+                                  POST :id/redeploy, POST :id/rollback  -> BUGS (filters,
+                                                                          live, rollback)
+  features/activity/activity.ts   GET /v1/activity?type&project&cursor&limit
+                                                                    -> BUG (filters ignored)
+  Selection: 100% of the routes the feature modules call exist in the backend.
+
+6.3 Real API vs mocks today
+  - deplogram-web/.env.example defaults to NEXT_PUBLIC_API_MOCKING=enabled and an empty
+    NEXT_PUBLIC_API_URL ("same origin"). MSW (src/mocks/handlers.ts) intercepts 30 routes
+    in the browser, including GET /v1/health which the backend does NOT implement.
+  - Setting NEXT_PUBLIC_API_MOCKING unset/disabled plus
+    NEXT_PUBLIC_API_URL=https://deplogram-backend.vercel.app at BUILD TIME switches the
+    app to this backend (NEXT_PUBLIC_* values are baked in at build; the app warns if
+    neither is configured).
+  - No frontend deployment exists in the Vercel account used for the backend, so it is
+    UNKNOWN whether the hosted site points at the API. Treat integration as not yet done.
+
+6.4 New auth pages (origin/Jayy, 2026-10-17)
+  - Adds /login and /signup pages and components. They are UI only: the submit handlers
+    contain TODOs and call no API. Google sign-in is also a TODO.
+  - The backend now exposes POST /v1/auth/sign-up for this form; the frontend still needs
+    a hook (and an MSW handler for mock mode). The demo sign-in (owner@deplogram.app)
+    already matches features/auth/session.ts.
+
+6.5 Contract mismatches / bugs the frontend will hit (see 8.4 for detail)
+  - Empty traffic/live map (B5); metrics all zero (B5/B20).
+  - New project never builds (B2); redeploy never goes live (B3); rollback semantics wrong
+    (B4).
+  - Deployment list filters return unfiltered results (B6); activity filters ignored (B7).
+  - `url` includes the scheme -> "https://https://..." links (B8).
+  - Missing 404s: unknown project returns 200 empty; unknown deployment returns 500 (B9).
+  - Successful deployments have `durationSeconds: null` -> the UI shows "running..." (B10).
+
+6.6 Endpoints still needed (not yet decided / not implemented)
+  - GET /v1/health                      - MSW smoke handler exists; no feature calls it.
+                                          Trivial to add; useful for uptime checks.
+  - Realtime channel (SSE/WebSocket)    - the frontend has TODO comments to replace
+                                          polling; no transport decided.
+  - Google OAuth / password reset       - links/TODOs exist in the new auth pages; no
+                                          endpoints, no provider decision.
+  - Team/workspace management, billing, usage metering, domain/DNS management,
+    webhooks for deploy events          - mentioned by the product brief but no contract
+                                          or implementation yet.
+
+--------------------------------------------------------------------------------
+7. SECURITY, LIMITS, JOBS AND INFRASTRUCTURE DEPENDENCIES
+--------------------------------------------------------------------------------
+7.1 Security measures present
+  - HttpOnly session cookie; Secure + SameSite=None in production; Lax locally.
+  - CORS with credentials; origin reflection by default, allow-list via CORS_ORIGIN.
+  - Auth body validation (sign-up: name/email/password rules; sign-in presence checks).
+  - SIGN_IN_ENABLED kill switch for sign-in (not sign-up).
+  - Plain-text secrets: none committed; config comes from environment variables.
+
+7.2 Security gaps / risks (must be closed before a real launch)
+  - No authorization on any /v1 route except /v1/me* (section 3.4). Anyone can create,
+    rename, delete projects, edit env vars, redeploy/rollback, and read all data.
+  - Passwords stored in plain text (store.ts:93, signUp store.ts:337); sessions are
+    unsigned random tokens in memory.
+  - No CSRF protection for cookie-authenticated mutations; CORS defaults to reflecting
+    any origin -> a malicious site could call the API with the victim's cookie.
+  - No rate limiting, account lockout, or abuse protection.
+  - No request-body validation on mutations (no DTOs) -> malformed bodies can corrupt
+    state or throw 500s.
+  - Env var values stored in plain text; no encryption/KMS; `PUT env` returns only keys.
+  - SSRF: POST /utils/webhook/test makes an outbound HTTP request to any caller-supplied
+    URL, including internal addresses (src/webhook-tester.service.ts).
+  - OTP codes are logged and emails default to smtp.example.com (demo only).
+  - No security headers (helmet/CSP); Swagger UI loads JS from a third-party CDN.
+  - No audit integrity: activity actor is just `currentUser` on a public endpoint.
+
+7.3 Resource limits
+  - activityOrder capped at 500 events; access log capped at 5000 points (unused today).
+  - No caps on users, sessions, projects, deployments, env vars, or log lines per
+    deployment; logs for deleted projects are never freed.
+  - `pageSize` on /v1/deployments has no upper bound.
+  - Express 5 default JSON body limit (~100 KB) applies; the JSON-body image/QR utility
+    routes need larger payloads.
+  - Vercel: 2 cores / 8 GB build, serverless execution/memory limits, ephemeral disk.
+
+7.4 Queues / background jobs
+  - None. There is no queue, worker, cron or job runner.
+  - The only background work is the setTimeout build simulation (section 5), which does
+    not survive serverless responses.
+  - No retries, no idempotency keys, no at-least-once delivery.
+
+7.5 Infrastructure dependencies (current)
+  - Vercel serverless functions (@vercel/node) + Vercel routing (vercel.json).
+  - In-process memory only (the store) - no DB, cache, queue or object storage.
+  - SMTP (nodemailer) for /email/send - unconfigured by default.
+  - sharp (native) and qrcode for image/QR utilities.
+  - jsdelivr CDN for Swagger UI assets.
+  - GitHub only as the source repo (no API integration at runtime).
+
+7.6 Environment variables
+  PORT             default 3000 (local)
+  CORS_ORIGIN      comma-separated allowed origins (unset -> reflect request origin)
+  SIGN_IN_ENABLED  "false" disables sign-in
+  JWT_SECRET       legacy /utils/jwt/* only (default "secret-key")
+  EMAIL_HOST/PORT/SECURE/USER/PASS/FROM   /email/send (defaults to smtp.example.com)
+  NODE_ENV / VERCEL   determine cookie Secure/SameSite
+  Current deployed state: the Vercel project has NO environment variables set, so CORS
+  reflects any origin and emails would fail.
+
+--------------------------------------------------------------------------------
+8. TESTS, SETUP, KNOWN BUGS, UNFINISHED MODULES, BLOCKERS
+--------------------------------------------------------------------------------
+8.1 Tests
+  `npm test` (vitest run, *.spec.ts)
+    - test/deplogram-api.spec.ts  : 32 contract tests over HTTP with a cookie agent.
+      They assert happy paths and shapes (auth incl. sign-up, workspace, traffic shape,
+      usage shape, projects/env/patch/logs/metrics, deployments list/detail/logs,
+      redeploy, rollback, git, activity, CORS reflection). They do NOT assert the
+      behaviours flagged as bugs (filters, live marking, 404s, empty traffic values).
+    - src/app.controller.spec.ts  : 1 unit test (greeting string).
+    - Result: 33/33 pass (2026-10-20).
+  `npm run test:e2e` (vitest --config vitest.config.e2e.ts)
+    - test/app.e2e-spec.ts        : 1 test that expects GET / -> 200 "Hello World!".
+      It FAILS now (the root route redirects 302 to /api/docs). Stale - update or delete.
+  No coverage thresholds are configured.
+
+8.2 API collections / generated artifacts
+  - No Postman/Insomnia/HTTP collection is committed.
+  - The live OpenAPI document (/api/docs-json) is the machine-readable contract; it is
+    generated at boot, not committed. Consider committing an openapi.json snapshot.
+
+8.3 Setup instructions
+  Local
+    npm install
+    npm run start:dev            # http://localhost:3000, seed data + demo user
+    npm test                     # 33 unit/contract tests
+    # POST /v1/auth/sign-in {"email":"owner@deplogram.app","password":"password"}
+  Build / deploy
+    npx tsc -p tsconfig.json     # use this, NOT `npm run build` (see 1.4)
+    VERCEL_TOKEN=... npx vercel deploy --prod --yes
+    vercel.json builds api/index.ts and routes /v1/*, /auth/*, /utils/*, /api/docs* and
+    a catch-all to it.
+  Production
+    https://deplogram-backend.vercel.app   (public; / -> 302 -> /api/docs)
+    /api/docs (Swagger UI), /api/docs-json (OpenAPI 3.0)
+
+8.4 Known bugs (severity: H/M/L, with evidence)
+  B1  H  In-memory store + serverless: all state and sessions are per-instance and can
+         vanish between requests; setTimeout builds are frozen after the response.
+         Evidence: a production redeploy was still QUEUED after 6s.
+         Files: api/index.ts, store.ts, deployments.service.ts.
+  B2  H  POST /v1/projects creates a first deployment but never starts its build.
+         Files: projects.service.ts:37-56 (no call to startBuild).
+  B3  H  A finished build never becomes live: finishBuild sets RUNNING but does not call
+         markLive, so no url, and the previous live deployment stays live.
+         Files: deployments.service.ts:244-249 ; store.ts:694.
+  B4  H  Rollback semantics are inverted vs. the frontend: it promotes id.previousLiveId
+         instead of the passed (earlier, non-live RUNNING) deployment, creates no new
+         deployment, and returns the wrong `deployment`. The existing test encodes the
+         wrong behaviour.
+         Files: deployments.service.ts:136-152 ; store.ts:712-733 ;
+         frontend deplogram-web/src/mocks/data/deployments.ts:209.
+  B5  H  The traffic access log is never written (appendRequest has no callers), so
+         /v1/traffic is always empty and metrics are all zero. Files: store.ts:856.
+  B6  M  /v1/deployments filters: `status` groups don't exclude non-matches, and
+         comma-separated status/project/branch/trigger values are not split.
+         Evidence: ?status=failed returned all 4 deployments; ?project=a,b returned 0.
+         Files: deployments.service.ts:59-95 ; deployments.controller.ts:61.
+  B7  M  /v1/activity ignores `type` and `project` (accepted then dropped).
+         Files: activity.controller.ts:17-23.
+  B8  M  `url` is returned with the scheme (https://x.deplogram.app) while the frontend
+         prepends "https://" -> broken links.
+         Files: store.ts:936 ; frontend use-deployment-actions.tsx:85 etc.
+  B9  M  Wrong error semantics: unknown project id -> 200 empty (exists? no), unknown
+         deployment/logs/metrics -> 500 instead of 404; DELETE unknown project -> 204;
+         PUT env unknown -> 200 []. Files: projects.controller.ts:50-85 ;
+         deployments.controller.ts:19-32 ; service throw sites.
+  B10 M  durationSeconds stays null for successful RUNNING deployments (only failures get
+         a duration), so the UI shows "running..." forever.
+         Files: store.ts:734-749.
+  B11 M  DeploymentState BUILDING/BUILT/DEPLOYING are never emitted by the simulator.
+         Files: deployments.service.ts:163-249.
+  B12 M  Simulated builds produce no log lines and delete their step list when finished
+         (steps: [] with done: true). Files: deployments.service.ts (no appendBuildLog),
+         builds.delete at 253.
+  B13 L  test/app.e2e-spec.ts is stale and fails (expects GET / -> 200 "Hello World!").
+  B14 L  The backend uses the host suffix "deplogram.app"; the frontend mock uses
+         "dpl.app". Product decision needed (the backend value is authoritative once the
+         domain model is set).
+  B15 L  No DTO classes -> the global ValidationPipe does nothing for most bodies;
+         malformed PATCH bodies can throw 500s.
+  B16 M  POST /v1/projects does not enforce unique names (duplicates accepted).
+  B17 L  PATCH /v1/projects/:id always records activity type `project.renamed`, even for
+         branch/config-only changes.
+  B18 L  Sign-up is not covered by SIGN_IN_ENABLED, and there is no rate limiting.
+
+8.5 Unfinished / placeholder modules
+  - Real Git integration (OAuth, cloning, webhooks) - not started.
+  - Real build/run infrastructure and runtime processes - not started.
+  - Traffic generation, real bandwidth/storage/build-minutes metering - placeholders.
+  - Runtime log generation for live deployments - missing.
+  - Realtime transport - undecided.
+  - Multi-user: workspace membership, per-user data isolation, authorization - missing.
+  - Account deletion only clears the session - incomplete.
+  - Google OAuth and password reset - frontend TODOs, no backend.
+  - Deploy-stage notifications (deploymentEmails preference) - stored, never sent.
+
+8.6 Immediate blockers before finalizing frontend/backend integration
+  1. Persistence + a place to run background builds (Postgres/Redis + a worker/queue, or
+     a long-lived service). In-memory + serverless cannot run the product.
+  2. Authorization on all /v1 mutations and per-user data isolation.
+  3. Fix the deployment lifecycle: start builds for new projects, emit BUILDING/BUILT/
+     DEPLOYING, mark live on success, set duration, write build/runtime log lines.
+  4. Fix rollback to match the frontend contract (promote the chosen deployment, create a
+     new rollback deployment, return previousLiveId of the old live one).
+  5. Generate traffic (or wire the real access log) so /v1/traffic and metrics work.
+  6. Fix list/activity filters and return 404s (and 409/422 where the UI expects them).
+  7. Fix `url` to be a host (or update the frontend) - one side only.
+  8. Decide and implement the realtime channel + the frontend env switch to the real API.
+
+8.7 Suggested order of work
+  Phase 1 (contract correctness, small): B6, B7, B8, B9, B10, B11, B12, B13, B15, B16,
+    B17; add GET /v1/health; update e2e test; commit an openapi.json snapshot.
+  Phase 2 (engine behaviour in-process): B2, B3, B4, B5 (generate traffic), log lines,
+    lifecycle states, durations - with tests that mirror the frontend mock semantics.
+  Phase 3 (architecture): database + migrations, real auth/authorization, secrets
+    encryption, queue/worker for builds, realtime, observability, rate limiting, CSRF.
+  Phase 4 (frontend): wire sign-up (hook + MSW handler), set NEXT_PUBLIC_API_URL,
+    disable mocking, deploy and run the contract tests against production.
+
+--------------------------------------------------------------------------------
+9. OPEN ARCHITECTURE DECISIONS (flagged, not guessed)
+--------------------------------------------------------------------------------
+  D1  Runtime/hosting model: keep serverless (and add external state + queue) or move to
+      a long-lived service (container/VM) that can run builds. NOT DECIDED.
+  D2  Database: Postgres (Prisma/Drizzle), MySQL, Mongo, SQLite/libSQL? Migrations and
+      ORM choice undecided. NOT DECIDED.
+  D3  Auth: keep the custom cookie session, or adopt an identity provider (NextAuth on
+      the frontend / Clerk / Auth0 / Supabase Auth)? Password hashing (argon2/bcrypt)
+      undecided. NOT DECIDED.
+  D4  Authorization model: session-scoped guards vs. API tokens/keys; roles; workspace
+      membership; multi-tenancy. NOT DECIDED.
+  D5  Git integration: GitHub App vs. OAuth App; webhook-driven deploys; token storage.
+      NOT DECIDED.
+  D6  Build/runtime infra: build workers, container vs. native runtimes, registry, CDN
+      and static hosting, DNS/TLS/domain model (deplogram.app vs dpl.app). NOT DECIDED.
+  D7  Realtime transport: SSE vs. WebSocket vs. long-poll; event schema. NOT DECIDED.
+  D8  Secrets: encryption-at-rest for env vars, KMS, audit access. NOT DECIDED.
+  D9  Metering/billing: how bandwidth, storage and build minutes are actually measured;
+      plan enforcement. NOT DECIDED.
+  D10 Observability: logging, metrics, tracing, error tracking; log retention. NOT DECIDED.
+  D11 Frontend hosting/API origin: where the web app is deployed and the exact
+      CORS_ORIGIN allow-list. NOT DECIDED (no frontend Vercel project found).
+
+--------------------------------------------------------------------------------
+10. SOURCE REFERENCE INDEX
+--------------------------------------------------------------------------------
+  src/deplogram/store.ts                     in-memory "database", seed, all helpers
+  src/deplogram/types.ts                     domain types / API contract
+  src/deplogram/deplogram.module.ts          /v1 module wiring + SessionMiddleware
+  src/deplogram/auth/auth.controller.ts      sign-up / sign-in / sign-out + cookie
+  src/deplogram/auth/session.middleware.ts   cookie -> currentUser per request
+  src/deplogram/account/account.controller.ts GET/DELETE /v1/me, settings (only authz)
+  src/deplogram/workspace/workspace.controller.ts
+  src/deplogram/traffic/traffic.service.ts   /v1/traffic window
+  src/deplogram/usage/usage.service.ts       plan limits + usage maths
+  src/deplogram/projects/projects.controller.ts / projects.service.ts
+  src/deplogram/deployments/deployments.controller.ts / deployments.service.ts (engine)
+  src/deplogram/git/git.controller.ts        simulated Git
+  src/deplogram/activity/activity.controller.ts
+  src/app-config.ts                          CORS, ValidationPipe, OpenAPI/Swagger
+  src/app.controller.ts                      root redirect + legacy utilities
+  src/main.ts / api/index.ts                 local + Vercel entry points
+  vercel.json / package.json / tsconfig.json build + routing + toolchain
+  test/deplogram-api.spec.ts                 32 contract tests
+  test/app.e2e-spec.ts                       stale e2e test (fails)
+  README.md                                  short API overview (some claims are ahead of
+                                             the implementation - see B7)
+
+  Frontend (deplogram-web, read-only reference)
+  src/features/**.ts                         Zod contracts + TanStack Query hooks
+  src/mocks/handlers.ts                      MSW mocks (30 routes), incl. /v1/health
+  src/mocks/data/deployments.ts              mock engine semantics (rollback/redeploy)
+  src/components/auth/*, src/app/login|signup   new auth UI (branch origin/Jayy)
+  src/content/runtimes.ts                    runtime catalogue
+  src/lib/api-client.ts                      apiFetch with credentials:"include"
+
+================================================================================
+END OF DOCUMENT
+================================================================================

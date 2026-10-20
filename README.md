@@ -1,5 +1,9 @@
 # deplogram-backend
 
+> Full architecture, API contract, data model, deployment-engine notes, frontend
+> integration status and known gaps: see
+> [`docs/BACKEND_ARCHITECTURE_AND_API_CONTRACT.txt`](docs/BACKEND_ARCHITECTURE_AND_API_CONTRACT.txt).
+
 A [NestJS](https://docs.nestjs.com) backend for Deplogram. It serves two kinds of routes:
 
 - the platform's `/v1/*` API — the contract the web frontend (`deplogram-web`) talks to, and
