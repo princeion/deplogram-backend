@@ -425,3 +425,98 @@ export interface Usage {
   /** Share of the period every running deployment answered health checks, 0–1. */
   uptime: number;
 }
+
+// ── Storage (the workspace drive) ──────────────────────────────────────────────
+
+export type StorageKind = 'folder' | 'file';
+export type LinkExpiry = '1h' | '1d' | '7d';
+
+/** One item on the workspace drive. Folders carry totals; files carry their bytes. */
+export interface StorageItem {
+  kind: StorageKind;
+  name: string;
+  /** Full path from the top of the drive, e.g. "assets/logos/logo.svg". */
+  path: string;
+  /** Bytes; for a folder, everything inside it. */
+  size: number;
+  /** Files only: MIME type. */
+  contentType: string | null;
+  /** Folders only: direct children. */
+  items: number | null;
+  createdAt: string;
+  updatedAt: string;
+  /** Images only: a small thumbnail URL. */
+  thumbnailUrl: string | null;
+  /** Folders: made public. Files: inside a public folder (inherited). */
+  public: boolean;
+  /** Files in a public folder: their permanent address. */
+  publicUrl: string | null;
+}
+
+export interface StorageList {
+  path: string;
+  items: StorageItem[];
+  /** This folder's files are public: it, or a folder above it, was made public. */
+  public: boolean;
+  /** The folder that made it public ("" never — the top of the drive can't be public). */
+  publicFrom: string | null;
+}
+
+export interface StorageLink {
+  url: string;
+  expiresAt: string;
+}
+
+export interface StorageUpload {
+  uploadUrl: string;
+}
+
+export interface StoragePreview {
+  /** A short-lived URL for images, video, audio and PDFs; null when there's nothing to show. */
+  url: string | null;
+  /** The text of text-like files (code, CSV, JSON, Markdown), up to a limit. */
+  text: string | null;
+  truncated: boolean;
+}
+
+// ── CodePad (standalone pads that run and deploy) ──────────────────────────────
+
+export type PadTemplate = 'static' | 'node' | 'python';
+
+export interface PadFile {
+  path: string;
+  content: string;
+  updatedAt: string;
+}
+
+export interface PadSummary {
+  id: string;
+  name: string;
+  runtime: string;
+  fileCount: number;
+  /** File paths, for previews in the list (no contents). */
+  paths: string[];
+  updatedAt: string;
+  /** Set once the pad has been deployed: the project it became. */
+  projectId: string | null;
+}
+
+export interface Pad extends PadSummary {
+  files: PadFile[];
+  /** The file to open first. */
+  entry: string;
+}
+
+export interface RunLogLine {
+  n: number;
+  at: string;
+  text: string;
+  stream: 'stdout' | 'stderr';
+}
+
+export interface RunLogs {
+  lines: RunLogLine[];
+  done: boolean;
+  /** null while running. */
+  exitCode: number | null;
+}

@@ -29,6 +29,16 @@ import {
   RuntimeLogLevel,
   RuntimeLogSource,
   RuntimeLogLine,
+  StorageItem,
+  StorageList,
+  StorageLink,
+  StoragePreview,
+  StorageUpload,
+  Pad,
+  PadFile,
+  PadSummary,
+  RunLogs,
+  RunLogLine,
   TrafficPoint,
   User,
   Viewer,
@@ -71,6 +81,18 @@ export class DeplogramStore {
   private readonly preferences = new Map<string, AccountPreferences>();
   /** Session token → user id. Powers cookie-based sign-in. */
   readonly sessions = new Map<string, string>();
+  /** The workspace drive: path → item. Folders carry totals; files carry their bytes. */
+  readonly storage = new Map<string, StorageItem>();
+  /** Uploaded file contents: path → the bytes (for previews). */
+  private readonly storageContents = new Map<string, { bytes: ArrayBuffer | null; text: string | null }>();
+  /** Public folder tokens: path → permanent base URL. */
+  private readonly storagePublic = new Map<string, string>();
+  /** Short-lived signed links: token → { path, expiresAt }. */
+  private readonly storageLinks = new Map<string, { path: string; expiresAt: number }>();
+  /** CodePad pads: pad id → pad. */
+  readonly pads = new Map<string, Pad>();
+  /** CodePad runs: run id → run. */
+  private readonly runs = new Map<string, RunState>();
 
   currentUser: User | null = null;
   connectedAccount: string | null = null;
@@ -299,6 +321,12 @@ export class DeplogramStore {
       null,
       'added SENTRY_DSN',
     );
+
+    // ── Storage: the workspace drive, seeded with a plausible folder tree ────────
+    this.seedStorage();
+
+    // ── CodePad: a couple of starter pads so the editor has something to open ─────
+    this.seedPads();
   }
 
   // ── workspace ────────────────────────────────────────────────────────────────
