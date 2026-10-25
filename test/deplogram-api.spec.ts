@@ -258,19 +258,25 @@ describe('Deplogram dashboard API surface (frontend contract)', () => {
     });
   });
 
-  it('POST /v1/deployments/:id/rollback promotes the earlier live deployment', async () => {
-    // dep_old_1 was live before dep_live; roll back dep_live.
+  it('POST /v1/deployments/:id/rollback creates a new live rollback deployment', async () => {
+    // dep_old_1 is an earlier, RUNNING, non-live deployment to roll back to.
     const res = await agent
-      .post('/v1/deployments/dep_live/rollback')
+      .post('/v1/deployments/dep_old_1/rollback')
       .expect(201);
-    expect(res.body).toMatchObject({
-      deployment: expect.objectContaining({ id: 'dep_live' }),
-      previousLiveId: 'dep_old_1',
-    });
-    // The earlier deployment is live again.
-    const promoted = await agent.get('/v1/deployments/dep_old_1').expect(200);
-    expect(promoted.body.live).toBe(true);
-    expect(promoted.body.state).toBe('RUNNING');
+    expect(res.body.deployment.id).toMatch(/^dep_/);
+    expect(res.body.deployment.trigger).toBe('rollback');
+    expect(res.body.previousLiveId).toBe('dep_live');
+
+    // The new rollback deployment is live.
+    const rollback = await agent
+      .get(`/v1/deployments/${res.body.deployment.id}`)
+      .expect(200);
+    expect(rollback.body.live).toBe(true);
+    expect(rollback.body.state).toBe('RUNNING');
+
+    // The previously live deployment is no longer live.
+    const previouslyLive = await agent.get('/v1/deployments/dep_live').expect(200);
+    expect(previouslyLive.body.live).toBe(false);
   });
 
   // ── git ─────────────────────────────────────────────────────────────────────

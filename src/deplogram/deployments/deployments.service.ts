@@ -1,4 +1,4 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import { ConflictException, Injectable, NotFoundException } from '@nestjs/common';
 
 import { DeplogramStore } from '../store.js';
 import {
@@ -57,9 +57,12 @@ export class DeploymentService {
     );
 
     const filtered = deployments.filter((deployment) => {
-      for (const group of statusGroups) {
-        const states = STATUS_GROUPS[group];
-        if (states && states.includes(deployment.state)) return true;
+      if (statusGroups.length) {
+        const matched = statusGroups.some((group) => {
+          const states = STATUS_GROUPS[group];
+          return Boolean(states && states.includes(deployment.state));
+        });
+        if (!matched) return false;
       }
       if (
         params.project?.length &&
@@ -118,7 +121,7 @@ export class DeploymentService {
   /** Builds the same commit again — used by "Redeploy" on a finished deployment. */
   redeploy(id: string): Deployment {
     const deployment = this.store.getDeployment(id);
-    if (!deployment) throw new Error('Unknown deployment');
+    if (!deployment) throw new NotFoundException('That deployment does not exist.');
     const fresh = this.store.createDeployment(deployment.projectId, {
       trigger: 'redeploy',
       commitSha: deployment.commit.sha,
@@ -130,22 +133,55 @@ export class DeploymentService {
   }
 
   /**
-   * Makes the earlier deployment that was live before `id` live again — used by
-   * "Rollback". `id` is the deployment being rolled back.
+   * Makes an earlier successful deployment live again by creating a new
+   * rollback deployment that copies it. `:id` is the earlier, RUNNING,
+   * non-live deployment the user chose ("Roll back to this").
    */
   rollback(id: string): {
     deployment: Deployment;
     previousLiveId: string | null;
   } {
-    const current = this.store.getDeployment(id);
-    if (!current) throw new Error('Unknown deployment');
-    const targetId = current.previousLiveId;
-    if (!targetId)
+    const target = this.store.getDeployment(id);
+    if (!target) throw new NotFoundException('That deployment does not exist.');
+    if (target.state !== 'RUNNING' || target.live)
       throw new ConflictException('No earlier deployment to roll back to');
-    const promoted = this.store.rollbackTo(current.projectId, id);
-    if (!promoted)
-      throw new ConflictException('No earlier deployment to roll back to');
-    return { deployment: current, previousLiveId: targetId };
+
+    const project = this.store.getProject(target.projectId);
+    if (!project) throw new NotFoundException('That project does not exist.');
+
+    const currentLive = [...this.store.allDeployments()]
+      .find((deployment) => deployment.projectId === target.projectId && deployment.live);
+    const previousLiveId = currentLive?.id ?? null;
+
+    const rollbackDeployment = this.store.createDeployment(target.projectId, {
+      trigger: 'rollback',
+      commitSha: target.commit.sha,
+      commitMessage: target.commit.message,
+      author: target.commit.author,
+    });
+    this.store.markLive(target.projectId, rollbackDeployment.id);
+
+    this.recordActivityRollback(target.projectId, rollbackDeployment.id, previousLiveId);
+
+    return { deployment: rollbackDeployment, previousLiveId };
+  }
+
+  private recordActivityRollback(
+    projectId: string,
+    deploymentId: string,
+    previousLiveId: string | null,
+  ): void {
+    const project = this.store.getProject(projectId);
+    const deployment = this.store.getDeployment(deploymentId);
+    if (!project || !deployment) return;
+    this.store.recordActivity(
+      this.store.currentUser ?? null,
+      'deployment.rolled_back',
+      project.name,
+      projectId,
+      deploymentId,
+      `rolled back to ${deployment.id}${previousLiveId ? ` (was ${previousLiveId})` : ''}`,
+    );
   }
 
   // ── build simulation ─────────────────────────────────────────────────────────
@@ -157,13 +193,17 @@ export class DeploymentService {
 
   /**
    * The build a newly created deployment goes through, played out by timers so
-   * the frontend can watch QUEUED → BUILDING → RUNNING happen. Clears itself once
-   * the deployment reaches a final state, so shutdown is never blocked.
+   * the frontend can watch QUEUED → BUILDING → BUILT → DEPLOYING → RUNNING
+   * happen. Clears itself once the deployment reaches a final state.
    */
-  private startBuild(deploymentId: string): void {
+  startBuild(deploymentId: string): void {
     const deployment = this.store.getDeployment(deploymentId);
     if (!deployment) return;
     this.builds.set(deploymentId, []);
+    deployment.state = 'BUILDING';
+    this.store.appendBuildLog(deploymentId, [
+      ['clone', 'stdout', 'Cloning repository…'],
+    ]);
     const steps: BuildStepId[] = [
       'clone',
       'install',
@@ -171,6 +211,13 @@ export class DeploymentService {
       'deploy',
       'runtime',
     ];
+    const stepLog: Record<BuildStepId, [BuildStepId, 'stdout' | 'stderr', string][]> = {
+      clone: [['clone', 'stdout', 'Resolved remote and fetched objects.']],
+      install: [['install', 'stdout', 'Installing dependencies…']],
+      build: [['build', 'stdout', 'Running build command…']],
+      deploy: [['deploy', 'stdout', 'Preparing deployment…']],
+      runtime: [['runtime', 'stdout', 'Starting runtime…']],
+    };
     let stepIndex = 0;
     const runNext = () => {
       const step = steps[stepIndex];
@@ -188,6 +235,7 @@ export class DeploymentService {
             this.failBuild(deploymentId, 'BUILD_FAILED');
             return;
           }
+          deployment.state = 'BUILT';
         }
         if (step === 'deploy') {
           const failed = Math.random() < 0.1;
@@ -195,8 +243,10 @@ export class DeploymentService {
             this.failBuild(deploymentId, 'DEPLOY_FAILED');
             return;
           }
+          deployment.state = 'DEPLOYING';
         }
         this.setStep(deploymentId, step, 'succeeded');
+        this.store.appendBuildLog(deploymentId, stepLog[step]);
         runNext();
       }, delay);
     };
@@ -237,6 +287,9 @@ export class DeploymentService {
     const deployment = this.store.getDeployment(deploymentId);
     if (!deployment) return;
     deployment.state = state;
+    this.store.appendBuildLog(deploymentId, [
+      ['deploy', 'stderr', `Build failed: ${state}.`],
+    ]);
     this.store.finishDeployment(deploymentId, state);
     this.builds.delete(deploymentId);
   }
@@ -246,6 +299,7 @@ export class DeploymentService {
     if (!deployment) return;
     deployment.state = state;
     this.store.finishDeployment(deploymentId, state);
+    this.store.markLive(deployment.projectId, deploymentId);
     this.builds.delete(deploymentId);
   }
 

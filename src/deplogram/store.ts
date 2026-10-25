@@ -24,21 +24,13 @@ import {
   GitConnection,
   GitDetection,
   GitRepository,
+  Pad,
   Project,
   ProjectEnvVar,
   RuntimeLogLevel,
   RuntimeLogSource,
   RuntimeLogLine,
   StorageItem,
-  StorageList,
-  StorageLink,
-  StoragePreview,
-  StorageUpload,
-  Pad,
-  PadFile,
-  PadSummary,
-  RunLogs,
-  RunLogLine,
   TrafficPoint,
   User,
   Viewer,
@@ -92,7 +84,7 @@ export class DeplogramStore {
   /** CodePad pads: pad id → pad. */
   readonly pads = new Map<string, Pad>();
   /** CodePad runs: run id → run. */
-  private readonly runs = new Map<string, RunState>();
+  private readonly runs = new Map<string, unknown>();
 
   currentUser: User | null = null;
   connectedAccount: string | null = null;
@@ -329,6 +321,91 @@ export class DeplogramStore {
     this.seedPads();
   }
 
+  private seedStorage(): void {
+    const now = isoNow();
+    const folders: [string, string][] = [
+      ['', 'assets'],
+      ['assets', 'logos'],
+      ['', 'docs'],
+    ];
+    for (const [parentPath, name] of folders) {
+      const path = parentPath ? `${parentPath}/${name}` : name;
+      this.storage.set(path, {
+        kind: 'folder',
+        name,
+        path,
+        size: 0,
+        contentType: null,
+        items: 0,
+        createdAt: now,
+        updatedAt: now,
+        thumbnailUrl: null,
+        public: false,
+        publicUrl: null,
+      });
+    }
+    this.storage.set('assets/logos/deplogram.svg', {
+      kind: 'file',
+      name: 'deplogram.svg',
+      path: 'assets/logos/deplogram.svg',
+      size: 4096,
+      contentType: 'image/svg+xml',
+      items: null,
+      createdAt: now,
+      updatedAt: now,
+      thumbnailUrl: null,
+      public: false,
+      publicUrl: null,
+    });
+    this.storage.set('docs/readme.md', {
+      kind: 'file',
+      name: 'readme.md',
+      path: 'docs/readme.md',
+      size: 2048,
+      contentType: 'text/markdown',
+      items: null,
+      createdAt: now,
+      updatedAt: now,
+      thumbnailUrl: null,
+      public: false,
+      publicUrl: null,
+    });
+  }
+
+  private seedPads(): void {
+    const now = isoNow();
+    const nodePad: Pad = {
+      id: 'pad_node',
+      name: 'hello-node',
+      runtime: 'node',
+      fileCount: 2,
+      paths: ['server.js', 'package.json'],
+      updatedAt: now,
+      projectId: null,
+      files: [
+        { path: 'server.js', content: 'console.log("hello from Node");\n', updatedAt: now },
+        { path: 'package.json', content: '{"name":"hello-node","version":"1.0.0"}\n', updatedAt: now },
+      ],
+      entry: 'server.js',
+    };
+    const staticPad: Pad = {
+      id: 'pad_static',
+      name: 'landing-page',
+      runtime: 'static',
+      fileCount: 2,
+      paths: ['index.html', 'style.css'],
+      updatedAt: now,
+      projectId: null,
+      files: [
+        { path: 'index.html', content: '<h1>Hello</h1>\n', updatedAt: now },
+        { path: 'style.css', content: 'body { margin: 0; }\n', updatedAt: now },
+      ],
+      entry: 'index.html',
+    };
+    this.pads.set(nodePad.id, nodePad);
+    this.pads.set(staticPad.id, staticPad);
+  }
+
   // ── workspace ────────────────────────────────────────────────────────────────
 
   currentWorkspace() {
@@ -553,14 +630,25 @@ export class DeplogramStore {
         config.rootDirectory = update.config.rootDirectory;
     }
     project.updatedAt = isoNow();
-    this.recordActivity(
-      this.currentUser,
-      'project.renamed',
-      project.name,
-      project.id,
-      null,
-      'updated project',
-    );
+    if (update.name !== undefined && update.name !== project.name) {
+      this.recordActivity(
+        this.currentUser,
+        'project.renamed',
+        project.name,
+        project.id,
+        null,
+        `renamed to ${update.name}`,
+      );
+    } else if (update.branch !== undefined || update.config !== undefined) {
+      this.recordActivity(
+        this.currentUser,
+        'settings.updated',
+        project.name,
+        project.id,
+        null,
+        'changed project settings',
+      );
+    }
     return project;
   }
 
@@ -763,15 +851,10 @@ export class DeplogramStore {
     const deployment = this.deployments.get(deploymentId);
     if (!deployment) return;
     deployment.state = state;
-    if (state !== 'RUNNING') {
-      const seconds = Math.max(
-        0,
-        Math.round(
-          (Date.now() - new Date(deployment.createdAt).getTime()) / 1000,
-        ),
-      );
-      deployment.durationSeconds = seconds;
-    }
+    deployment.durationSeconds = Math.max(
+      0,
+      Math.round((Date.now() - new Date(deployment.createdAt).getTime()) / 1000),
+    );
   }
 
   // ── logs ─────────────────────────────────────────────────────────────────────
@@ -960,9 +1043,9 @@ export class DeplogramStore {
     };
   }
 
-  /** The public URL a project's current deployment would serve. */
+  /** The public host a project's current deployment would serve (no scheme). */
   urlOf(projectName: string): string {
-    return `https://${projectName}.deplogram.app`;
+    return `${projectName}.deplogram.app`;
   }
 
   private defaultRuntimeVersion(runtime: string): string {

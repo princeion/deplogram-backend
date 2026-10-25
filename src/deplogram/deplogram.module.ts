@@ -1,5 +1,6 @@
 import { Global, Module, NestModule, MiddlewareConsumer } from '@nestjs/common';
 
+import { HealthController } from './health/health.controller.js';
 import { AccountController } from './account/account.controller.js';
 import { ActivityModule } from './activity/activity.module.js';
 import { AuthController } from './auth/auth.controller.js';
@@ -30,6 +31,7 @@ import { WorkspaceController } from './workspace/workspace.controller.js';
   controllers: [
     AuthController,
     AccountController,
+    HealthController,
     WorkspaceController,
     TrafficController,
     UsageController,

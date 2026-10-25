@@ -1,6 +1,7 @@
-import { Injectable } from '@nestjs/common';
+import { ConflictException, Injectable } from '@nestjs/common';
 
 import { DeplogramStore } from '../store.js';
+import { DeploymentService } from '../deployments/deployments.service.js';
 import {
   Deployment,
   DeploymentState,
@@ -17,7 +18,10 @@ const METRICS_RANGES: readonly MetricsRange[] = ['1h', '24h', '7d'];
 
 @Injectable()
 export class ProjectsService {
-  constructor(private readonly store: DeplogramStore) {}
+  constructor(
+    private readonly store: DeplogramStore,
+    private readonly deployments: DeploymentService,
+  ) {}
 
   // ── projects ─────────────────────────────────────────────────────────────────
 
@@ -47,6 +51,11 @@ export class ProjectsService {
     };
     env: { key: string; value: string }[];
   }): { project: ProjectSummary; deployment: Deployment } {
+    for (const existing of this.store.listProjects()) {
+      if (existing.name === input.name) {
+        throw new ConflictException('That project name is already taken.');
+      }
+    }
     const project = this.store.createProject(input);
     const deployment = this.store.createDeployment(project.id, {
       trigger: 'git',
@@ -54,6 +63,7 @@ export class ProjectsService {
       commitMessage: `deploy ${project.name}`,
       author: { name: 'Ada Lovelace', avatarUrl: null },
     });
+    this.deployments.startBuild(deployment.id);
     return { project: this.summarize(project, false), deployment };
   }
 
