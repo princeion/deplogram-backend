@@ -17,6 +17,7 @@ import {
   BuildLogLine,
   BuildStepId,
   Deployment,
+  DeploymentConfigSnapshot,
   DeploymentState,
   DeploymentTrigger,
   EnvVarRecord,
@@ -314,6 +315,9 @@ export class DeplogramStore {
       'added SENTRY_DSN',
     );
 
+    // ── Additional mock data: more projects, repos, deployments, traffic ─────────
+    this.seedMockProjects();
+
     // ── Storage: the workspace drive, seeded with a plausible folder tree ────────
     this.seedStorage();
 
@@ -404,6 +408,303 @@ export class DeplogramStore {
     };
     this.pads.set(nodePad.id, nodePad);
     this.pads.set(staticPad.id, staticPad);
+  }
+
+  /** Seed additional mock data mirroring the frontend mock API so the backend has
+   *  realistic data when the frontend switches from MSW mocking to the real API.
+   *  Existing seeded data (proj_storefront, dep_live, etc.) is left untouched so
+   *  existing tests keep passing. */
+  private seedMockProjects(): void {
+    const owner = this.currentUser;
+
+    // ── Additional git repositories (frontend mock: git.ts) ──────────────────────
+    const repos: GitRepository[] = [
+      {
+        id: 'repo_orders',
+        fullName: 'ada/orders-api',
+        private: true,
+        defaultBranch: 'main',
+        updatedAt: daysAgo(0),
+        projectId: null,
+      },
+      {
+        id: 'repo_admin',
+        fullName: 'ada/admin-dashboard',
+        private: true,
+        defaultBranch: 'main',
+        updatedAt: daysAgo(28),
+        projectId: null,
+      },
+      {
+        id: 'repo_payments',
+        fullName: 'ada/payments-service',
+        private: true,
+        defaultBranch: 'main',
+        updatedAt: daysAgo(20),
+        projectId: null,
+      },
+      {
+        id: 'repo_ml',
+        fullName: 'ada/recommendations-api',
+        private: true,
+        defaultBranch: 'main',
+        updatedAt: daysAgo(50),
+        projectId: null,
+      },
+      {
+        id: 'repo_marketing',
+        fullName: 'ada/marketing-site',
+        private: false,
+        defaultBranch: 'main',
+        updatedAt: daysAgo(76),
+        projectId: null,
+      },
+      {
+        id: 'repo_crm',
+        fullName: 'ada/legacy-crm',
+        private: true,
+        defaultBranch: 'master',
+        updatedAt: daysAgo(400),
+        projectId: null,
+      },
+      {
+        id: 'repo_worker',
+        fullName: 'ada/queue-worker',
+        private: true,
+        defaultBranch: 'main',
+        updatedAt: daysAgo(130),
+        projectId: null,
+      },
+      {
+        id: 'repo_notes',
+        fullName: 'ada/scratch-notes',
+        private: false,
+        defaultBranch: 'main',
+        updatedAt: daysAgo(900),
+        projectId: null,
+      },
+    ];
+    for (const repo of repos) this.repositories.set(repo.id, repo);
+
+    const branchesFor: Record<string, GitBranch[]> = {
+      repo_orders: [{ name: 'main', commit: { sha: '72c32b8', message: 'feat: add order filters' } }],
+      repo_admin: [{ name: 'main', commit: { sha: 'f3a1c9e', message: 'feat: dark mode toggle' } }],
+      repo_payments: [
+        { name: 'main', commit: { sha: '4b7c9e1', message: 'fix: idempotency on retries' } },
+        { name: 'release/1.2', commit: { sha: 'a3f0c88', message: 'chore: release 1.2.0' } },
+      ],
+      repo_ml: [{ name: 'main', commit: { sha: 'c2d81f4', message: 'feat: cold-start fallback' } }],
+      repo_marketing: [{ name: 'main', commit: { sha: '5e6a1b9', message: 'content: pricing FAQ' } }],
+      repo_crm: [{ name: 'master', commit: { sha: '9f12d0e', message: 'fix: invoice rounding' } }],
+      repo_worker: [{ name: 'main', commit: { sha: '0aa4e57', message: 'feat: dead-letter queue' } }],
+      repo_notes: [{ name: 'main', commit: { sha: '77b3c21', message: 'notes' } }],
+    };
+    for (const [repoId, branches] of Object.entries(branchesFor)) {
+      this.branches.set(repoId, branches);
+    }
+
+    const detectionFor: Record<string, GitDetection | null> = {
+      repo_orders: { runtime: 'node', evidence: 'package.json (express)', buildCommand: 'npm run build', startCommand: 'node dist/server.js', port: 8080, envExample: ['DATABASE_URL'] },
+      repo_admin: { runtime: 'nextjs', evidence: 'package.json (next)', buildCommand: 'next build', startCommand: 'next start', port: 3000, envExample: ['NEXT_PUBLIC_API_URL'] },
+      repo_payments: { runtime: 'go', evidence: 'go.mod', buildCommand: 'go build -o app ./cmd/server', startCommand: './app', port: 8080, envExample: ['DATABASE_URL', 'PAYSTACK_SECRET_KEY', 'WEBHOOK_SECRET'] },
+      repo_ml: { runtime: 'python', evidence: 'requirements.txt (fastapi)', buildCommand: 'pip install -r requirements.txt', startCommand: 'uvicorn main:app --host 0.0.0.0 --port 8000', port: 8000, envExample: ['MODEL_PATH', 'REDIS_URL'] },
+      repo_marketing: { runtime: 'nextjs', evidence: 'package.json (next)', buildCommand: 'next build', startCommand: 'next start', port: 3000, envExample: ['NEXT_PUBLIC_SITE_URL'] },
+      repo_crm: { runtime: 'php', evidence: 'composer.json (laravel)', buildCommand: 'composer install --no-dev', startCommand: 'php artisan serve --host 0.0.0.0 --port 8000', port: 8000, envExample: ['APP_KEY', 'DB_HOST', 'DB_PASSWORD'] },
+      repo_worker: { runtime: 'docker', evidence: 'Dockerfile', buildCommand: 'docker build .', startCommand: null, port: 9000, envExample: ['QUEUE_URL'] },
+      repo_notes: null,
+    };
+    for (const [repoId, detection] of Object.entries(detectionFor)) {
+      // detection computed inline by detect(); kept for reference if needed later
+      void detection;
+      void repoId;
+    }
+
+    // ── Additional projects (frontend mock: projects.ts) ──────────────────────────
+    const projects: Project[] = [
+      {
+        id: 'proj_orders',
+        name: 'orders-api',
+        runtime: 'node',
+        state: 'RUNNING',
+        url: 'orders-api.deplogram.app',
+        repository: 'ada/orders-api',
+        branch: 'main',
+        updatedAt: daysAgo(41),
+        latest: { id: 'dep_orders_001', state: 'RUNNING', live: true, sha: 'a1b2c3d', message: 'feat: add order filters', createdAt: daysAgo(2) },
+        recent: ['RUNNING', 'RUNNING', 'RUNNING', 'RUNNING', 'RUNNING'],
+        createdAt: daysAgo(41),
+        liveDeploymentId: 'dep_orders_001',
+        envCount: 4,
+        config: { runtimeVersion: 'Node.js 22', buildCommand: 'npm run build', startCommand: 'node dist/server.js', port: 8080, rootDirectory: null },
+        env: [
+          { key: 'DATABASE_URL', value: 'postgres://…', updatedAt: daysAgo(41) },
+          { key: 'JWT_SECRET', value: '…', updatedAt: daysAgo(20) },
+          { key: 'REDIS_URL', value: 'redis://…', updatedAt: daysAgo(6) },
+          { key: 'PAYSTACK_SECRET_KEY', value: 'sk_…', updatedAt: daysAgo(2) },
+        ],
+      },
+      {
+        id: 'proj_admin',
+        name: 'admin-dashboard',
+        runtime: 'nextjs',
+        state: 'BUILDING',
+        url: 'admin-dashboard.deplogram.app',
+        repository: 'ada/admin-dashboard',
+        branch: 'main',
+        updatedAt: daysAgo(28),
+        latest: { id: 'dep_admin_016', state: 'BUILDING', live: false, sha: 'f3a1c9e', message: 'feat: dark mode toggle', createdAt: daysAgo(28) },
+        recent: ['BUILDING', 'RUNNING', 'RUNNING', 'RUNNING', 'RUNNING'],
+        createdAt: daysAgo(28),
+        liveDeploymentId: null,
+        envCount: 2,
+        config: { runtimeVersion: 'Next.js 16', buildCommand: 'next build', startCommand: 'next start', port: 3000, rootDirectory: null },
+        env: [
+          { key: 'NEXT_PUBLIC_API_URL', value: 'https://orders-api.deplogram.app', updatedAt: daysAgo(28) },
+          { key: 'AUTH_SECRET', value: '…', updatedAt: daysAgo(9) },
+        ],
+      },
+      {
+        id: 'proj_docs2',
+        name: 'docs-site',
+        runtime: 'static',
+        state: 'BUILD_FAILED',
+        url: 'docs-site.deplogram.app',
+        repository: 'ada/docs-site',
+        branch: 'main',
+        updatedAt: daysAgo(60),
+        latest: { id: 'dep_docs2_008', state: 'BUILD_FAILED', live: false, sha: 'e4f5a6b', message: 'docs: storage guide', createdAt: daysAgo(60) },
+        recent: ['BUILD_FAILED', 'RUNNING', 'RUNNING', 'BUILD_FAILED', 'RUNNING'],
+        createdAt: daysAgo(60),
+        liveDeploymentId: null,
+        envCount: 0,
+        config: { runtimeVersion: 'Static site', buildCommand: 'npx docusaurus build', startCommand: null, port: null, rootDirectory: 'website' },
+        env: [],
+      },
+    ];
+
+    for (const project of projects) {
+      this.projects.set(project.id, project);
+      const repoId = project.name === 'orders-api' ? 'repo_orders' : project.name === 'admin-dashboard' ? 'repo_admin' : null;
+      if (repoId) {
+        const repo = this.repositories.get(repoId);
+        if (repo) repo.projectId = project.id;
+      }
+    }
+
+    // ── Additional deployments (frontend mock: deployments.ts ~46 deployments) ──
+    const messagesFor: Record<string, string[]> = {
+      proj_orders: [
+        'feat: add order filters', 'fix: pagination cursor on large accounts', 'chore: bump hono to 4.6',
+        'feat: retry failed webhooks with backoff', 'perf: cache order totals per day',
+      ],
+      proj_admin: [
+        'fix: table pagination', 'feat: audit log page', 'feat: role management for staff',
+        'fix: chart tooltip overflow', 'feat: dark mode toggle',
+      ],
+      proj_docs2: ['docs: storage guide', 'docs: runtime versions table', 'fix: broken links in API reference'],
+    };
+    const configFor: Record<string, DeploymentConfigSnapshot> = {
+      proj_orders: { runtimeVersion: 'Node.js 22', buildCommand: 'npm run build', startCommand: 'node dist/server.js', port: 8080 },
+      proj_admin: { runtimeVersion: 'Next.js 16', buildCommand: 'next build', startCommand: 'next start', port: 3000 },
+      proj_docs2: { runtimeVersion: 'Static site', buildCommand: 'npx docusaurus build', startCommand: null, port: null },
+    };
+
+    const ordersDeployments = this.generateMockDeploymentsFor('proj_orders', 'orders-api', 'node', 22, 'RUNNING', configFor['proj_orders'], messagesFor['proj_orders']);
+    const adminDeployments = this.generateMockDeploymentsFor('proj_admin', 'admin-dashboard', 'nextjs', 16, 'BUILDING', configFor['proj_admin'], messagesFor['proj_admin']);
+    const docsDeployments = this.generateMockDeploymentsFor('proj_docs2', 'docs-site', 'static', 8, 'BUILD_FAILED', configFor['proj_docs2'], messagesFor['proj_docs2']);
+
+    for (const d of [...ordersDeployments, ...adminDeployments, ...docsDeployments]) {
+      this.deployments.set(d.id, d);
+      this.recordActivity(
+        owner,
+        d.state === 'RUNNING' || ['BUILD_FAILED', 'DEPLOY_FAILED', 'CRASHED'].includes(d.state)
+          ? 'deployment.succeeded'
+          : 'deployment.started',
+        d.projectName,
+        d.projectId,
+        d.id,
+        d.trigger === 'git' ? `pushed to ${d.commit.branch}` : d.trigger === 'redeploy' ? 'redeployed' : 'deployed from the dashboard',
+      );
+    }
+
+    // ── Traffic: seed recent requests so /v1/traffic and metrics have data ───────
+    const cities = ['LOS', 'ABV', 'ACC', 'NBO', 'JNB', 'CAI', 'LON', 'FRA', 'NYC', 'SFO', 'TOR', 'GRU', 'DXB', 'BOM', 'SIN', 'TYO', 'SYD'];
+    const pathsByRuntime: Record<string, string[]> = {
+      node: ['/api/orders', '/api/orders/:id', '/api/customers', '/api/webhooks/paystack', '/healthz'],
+      nextjs: ['/', '/orders', '/settings', '/api/auth/session', '/_next/data/build/orders.json'],
+      static: ['/', '/docs/getting-started', '/docs/storage', '/assets/main.css', '/img/logo.svg'],
+    };
+    const liveProjectIds = ['proj_storefront', 'proj_orders'];
+    const rand = () => Math.random();
+    for (const projectId of liveProjectIds) {
+      const project = this.projects.get(projectId);
+      const runtime = project?.runtime ?? 'node';
+      const paths = pathsByRuntime[runtime] ?? pathsByRuntime['node'];
+      const latestDeployments = [...this.deployments.values()]
+        .filter((d) => d.projectId === projectId)
+        .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      const latestDeployment = latestDeployments[0];
+      if (!latestDeployment) continue;
+      for (let i = 0; i < 60; i++) {
+        const path = paths[Math.floor(rand() * paths.length)];
+        const method = path.startsWith('/api/') && rand() < 0.25 ? 'POST' : 'GET';
+        const roll = rand();
+        const status = roll < 0.02 ? 500 : roll < 0.07 ? 404 : roll < 0.1 ? 304 : 200;
+        const latencyMs = Math.round(8 + rand() * 600);
+        this.appendRequest(latestDeployment, status >= 500, cities[Math.floor(rand() * cities.length)], status, latencyMs, `${method} ${path}`);
+      }
+    }
+  }
+
+  /** Generates a deterministic set of historical deployments for a project, newest first. */
+  private generateMockDeploymentsFor(
+    projectId: string,
+    projectName: string,
+    runtime: string,
+    count: number,
+    latestState: DeploymentState,
+    config: DeploymentConfigSnapshot,
+    messages: string[],
+  ): Deployment[] {
+    const now = Date.now();
+    const rand = () => Math.random();
+    const hex = () => Math.floor(rand() * 0xfffffff).toString(16).padStart(7, '0').slice(0, 7);
+    const authors = ['Ada Obi', 'Tobi Adeyemi', 'Ngozi Eze'];
+    const branches = ['main', 'main', 'main', 'feat/webhooks', 'fix/reports'];
+    const triggers: DeploymentTrigger[] = ['git', 'manual', 'redeploy', 'rollback'];
+    const deployments: Deployment[] = [];
+
+    let minutesAgo = projectId === 'proj_admin' ? 1 : projectId === 'proj_orders' ? 2 : 72;
+    for (let i = 0; i < count; i++) {
+      const state: DeploymentState =
+        i === 0 ? latestState : rand() < 0.12 ? (rand() < 0.5 ? 'BUILD_FAILED' : rand() < 0.8 ? 'DEPLOY_FAILED' : 'CRASHED') : 'RUNNING';
+      const failed = ['BUILD_FAILED', 'DEPLOY_FAILED', 'CRASHED'].includes(state);
+      const trigger: DeploymentTrigger = triggers[Math.floor(rand() * triggers.length)];
+      const live = state === 'RUNNING' && deployments.every((d) => d.projectId !== projectId || !d.live);
+      const id = `dpl_${projectId.slice(4)}_${String(count - i).padStart(3, '0')}`;
+      deployments.push({
+        id,
+        projectId,
+        projectName,
+        runtime,
+        state,
+        live,
+        commit: {
+          sha: hex(),
+          message: messages[i % messages.length],
+          branch: i === 0 ? 'main' : branches[Math.floor(rand() * branches.length)],
+          author: { name: authors[Math.floor(rand() * authors.length)], avatarUrl: null },
+        },
+        trigger,
+        createdAt: new Date(now - minutesAgo * 60_000).toISOString(),
+        durationSeconds: state === 'QUEUED' ? null : failed ? 8 + Math.floor(rand() * 60) : 25 + Math.floor(rand() * 140),
+        url: live ? `${projectName}.deplogram.app` : null,
+        config: { ...config },
+        previousLiveId: i > 0 ? deployments[0]?.id ?? null : null,
+      });
+      minutesAgo += 90 + Math.floor(rand() * 600);
+    }
+    return deployments;
   }
 
   // ── workspace ────────────────────────────────────────────────────────────────
@@ -1027,20 +1328,19 @@ export class DeplogramStore {
   }
 
   detect(repositoryId: string, _branch: string): GitDetection {
-    const runtime =
-      repositoryId === 'repo_storefront'
-        ? 'nextjs'
-        : repositoryId === 'repo_api'
-          ? 'node'
-          : null;
-    return {
-      runtime,
-      evidence: runtime ? `package.json (${runtime})` : null,
-      buildCommand: runtime === 'nextjs' ? 'npm run build' : 'npm run build',
-      startCommand: runtime === 'nextjs' ? 'npm start' : 'node server.js',
-      port: runtime === 'nextjs' ? 3000 : 8080,
-      envExample: [],
+    const detectionFor: Record<string, GitDetection | null> = {
+      repo_orders: { runtime: 'node', evidence: 'package.json (express)', buildCommand: 'npm run build', startCommand: 'node dist/server.js', port: 8080, envExample: ['DATABASE_URL'] },
+      repo_admin: { runtime: 'nextjs', evidence: 'package.json (next)', buildCommand: 'next build', startCommand: 'next start', port: 3000, envExample: ['NEXT_PUBLIC_API_URL'] },
+      repo_payments: { runtime: 'go', evidence: 'go.mod', buildCommand: 'go build -o app ./cmd/server', startCommand: './app', port: 8080, envExample: ['DATABASE_URL', 'PAYSTACK_SECRET_KEY', 'WEBHOOK_SECRET'] },
+      repo_ml: { runtime: 'python', evidence: 'requirements.txt (fastapi)', buildCommand: 'pip install -r requirements.txt', startCommand: 'uvicorn main:app --host 0.0.0.0 --port 8000', port: 8000, envExample: ['MODEL_PATH', 'REDIS_URL'] },
+      repo_marketing: { runtime: 'nextjs', evidence: 'package.json (next)', buildCommand: 'next build', startCommand: 'next start', port: 3000, envExample: ['NEXT_PUBLIC_SITE_URL'] },
+      repo_crm: { runtime: 'php', evidence: 'composer.json (laravel)', buildCommand: 'composer install --no-dev', startCommand: 'php artisan serve --host 0.0.0.0 --port 8000', port: 8000, envExample: ['APP_KEY', 'DB_HOST', 'DB_PASSWORD'] },
+      repo_worker: { runtime: 'docker', evidence: 'Dockerfile', buildCommand: 'docker build .', startCommand: null, port: 9000, envExample: ['QUEUE_URL'] },
+      repo_notes: null,
+      repo_storefront: { runtime: 'nextjs', evidence: 'package.json (next)', buildCommand: 'npm run build', startCommand: 'npm start', port: 3000, envExample: [] },
+      repo_api: { runtime: 'node', evidence: 'package.json (express)', buildCommand: 'npm run build', startCommand: 'node server.js', port: 8080, envExample: [] },
     };
+    return detectionFor[repositoryId] ?? { runtime: null, evidence: null, buildCommand: null, startCommand: null, port: null, envExample: [] };
   }
 
   /** The public host a project's current deployment would serve (no scheme). */
@@ -1064,4 +1364,8 @@ export class DeplogramStore {
         return 'latest';
     }
   }
+}
+
+function daysAgo(days: number): string {
+  return new Date(Date.now() - days * 86_400_000).toISOString();
 }
